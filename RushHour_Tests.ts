@@ -7,7 +7,7 @@
  *
  * 이 파일은 Horizon Component 가 아니라 순수 검증 하네스다.
  * 월드에 배치되지 않으며, `runRushHourTests()` 를 호출하면 결과를 돌려준다.
- * Node 에서 돌리려면 순수 로직 파일들만 컴파일해 실행하면 된다 (RUSHHOUR_PROGRESS.md §5 참고).
+ * Node 에서 돌리려면 순수 로직 파일들만 컴파일해 실행하면 된다 (`Documents/생성 문서/가이드/타입체크와_테스트_실행.md` §3 참고).
  */
 
 import { RushHourBoard } from 'RushHour_Board';
@@ -16,13 +16,14 @@ import { RushHourEvents } from 'RushHour_GameEvents';
 import { RushHourLevelGenerator } from 'RushHour_LevelGenerator';
 import { RushHourSession } from 'RushHour_Session';
 import { RushHourSolver } from 'RushHour_Solver';
-import { RushHourTables } from 'RushHour_DataTables';
+import { DEFAULT_RUSH_HOUR_FIELD_TABLE, RUSHHOUR_CSV_FIELD_TABLE, RushHourTables } from 'RushHour_DataTables';
 import {
 	EGoalStatus,
 	EMoveDirection,
 	EOrientation,
 	ERushHourState,
 	RushHourLevel,
+	isEndPointInsidePlayField,
 } from 'RushHour_Definitions';
 
 export type RushHourTestResult = {
@@ -48,21 +49,30 @@ class TestRecorder {
 /** 모든 검증을 실행하고 결과를 돌려준다 */
 export function runRushHourTests(): RushHourTestReport {
 	const recorder = new TestRecorder();
+
+	// 실제 운영 테이블 - 기획 CSV(NPUZ_02) 가 들어 있다
 	const tables = new RushHourTables();
 
-	const field = tables.getField('RH_D1_001');
+	// 손으로 배치하고 솔버로 검증한 샘플 한 판만 담은 테이블.
+	// 조작·세션 테스트는 결과가 결정적이어야 하므로 이쪽을 쓴다.
+	const sampleTables = new RushHourTables();
+	sampleTables.loadFieldTable(DEFAULT_RUSH_HOUR_FIELD_TABLE);
+
+	const field = sampleTables.getField('RH_D1_001');
 	if (field === undefined) {
 		recorder.check('샘플 필드 RH_D1_001 존재', false, '필드 테이블에서 찾을 수 없음');
 		return buildReport(recorder);
 	}
-	const level = tables.buildLevel(field);
+	const level = sampleTables.buildLevel(field);
 
-	testSampleLevel(recorder, tables, level);
+	testSampleLevel(recorder, sampleTables, level);
 	testAxisAndOverlap(recorder, level);
 	testDragInteraction(recorder, level);
 	testDockAndUndock(recorder, level);
-	testSession(recorder, tables);
-	testGeneration(recorder, tables);
+	testCsvDockAndClear(recorder, tables);
+	testSession(recorder, sampleTables);
+	testGeneration(recorder, sampleTables);
+	testCsvFieldTable(recorder, tables);
 
 	return buildReport(recorder);
 }
@@ -239,6 +249,60 @@ function testDockAndUndock(recorder: TestRecorder, level: RushHourLevel): void {
 	recorder.check('재분리 후 2칸 점유', board.getGoalOccupiedCellsInFullGrid(goal.id).length === 2);
 }
 
+/**
+ * 회귀 - 기획 CSV(NPUZ_02) 판에서도 USB 가 꽂히고 판이 클리어되는가 (§9 / §11.3).
+ *
+ * CSV 판은 도착 포인트가 **7x7 플레이 공간 안쪽** 가장자리 칸에 있어서 USB 는 그 앞 칸까지만
+ * 갈 수 있다. 예전 컨트롤러는 밀착 좌표를 판의 바깥 변(0 또는 size-1)으로 가정했기 때문에
+ * 그 판에서는 밀착 판정이 영원히 거짓이 되고 결합 범위 자체가 열리지 않았다.
+ * 그 결과 "USB 를 삽입구에 붙였는데 클리어가 되지 않는다" 는 신고가 나왔다.
+ */
+function testCsvDockAndClear(recorder: TestRecorder, tables: RushHourTables): void {
+	const solver = new RushHourSolver();
+
+	let board: RushHourBoard | undefined = undefined;
+	let puzzleId = '';
+	for (const field of RUSHHOUR_CSV_FIELD_TABLE.slice(0, 8)) {
+		const candidate = RushHourBoard.fromLevel(tables.buildLevel(field));
+		const solution = solver.solve(candidate, { maxStates: 200000 });
+		if (solution.isSolvable === false) {
+			continue;
+		}
+		for (const move of solution.moves) {
+			candidate.slide(move.pieceId, move.direction, move.steps);
+		}
+		board = candidate;
+		puzzleId = field.puzzleId;
+		break;
+	}
+
+	if (board === undefined) {
+		recorder.check('CSV 판 중 풀리는 판이 있다', false, '앞 8판이 모두 풀리지 않았다');
+		return;
+	}
+
+	recorder.check('CSV 판의 도착 포인트는 플레이 공간 안쪽 칸이다',
+		board.endPoints.filter((endPoint) => isEndPointInsidePlayField(endPoint)).length === board.endPoints.length,
+		puzzleId);
+	recorder.check('CSV 판도 도착까지는 간다', board.hasEveryGoalArrived(), puzzleId);
+	recorder.check('도착만으로는 아직 클리어가 아니다', board.isSolved() === false, puzzleId);
+
+	// 삽입구에 밀착한 자리에서 손을 떼기만 해도 꽂힌다
+	const drag = new RushHourDragController(board);
+	for (const goal of board.goalPieces) {
+		drag.begin(goal.row, goal.col);
+		drag.update(goal.row, goal.col);
+		const result = drag.end();
+		recorder.check(`CSV 판 USB 결합 (${goal.id})`, result?.didDock === true, JSON.stringify(result));
+	}
+
+	recorder.check('CSV 판이 클리어된다', board.isSolved(), puzzleId);
+	for (const goal of board.goalPieces) {
+		recorder.check(`CSV 판 결합 시 3칸 점유 (${goal.id})`,
+			board.getGoalOccupiedCellsInFullGrid(goal.id).length === 3);
+	}
+}
+
 //#endregion
 
 //#region 세션 - 라운드 / 제한시간 / 승패
@@ -330,6 +394,66 @@ function testGeneration(recorder: TestRecorder, tables: RushHourTables): void {
 	const first = generator.generate({ puzzleId: 'SEEDED', difficulty: 2, seed: 777 });
 	const second = generator.generate({ puzzleId: 'SEEDED', difficulty: 2, seed: 777 });
 	recorder.check('같은 시드는 같은 레벨을 만든다', JSON.stringify(first) === JSON.stringify(second));
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_02)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_02_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ *
+ * §6 의 "한 줄 가득 채우기 금지 / 모든 오브젝트 1칸 이동 가능"은 기획서가
+ * **레벨 생성기** 검증 항목으로 정의한 것이라 기획 데이터에는 강제하지 않는다.
+ * 나머지 규칙(도착 포인트 개수·위치, 목표 개수·동일 선상, 시작부터 클리어 금지,
+ * 목표 경로에 같은 축 방해물 금지)은 여기서 전부 확인한다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: RushHourTables): void {
+	const fields = RUSHHOUR_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const generator = new RushHourLevelGenerator(tables);
+	const invalid: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const board = RushHourBoard.fromLevel(tables.buildLevel(field));
+		const result = generator.validator.validate(board, { enforceGeneratorConstraints: false });
+		if (result.isValid === false) {
+			invalid.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+	recorder.check('모든 CSV 레벨이 배치 규칙을 만족', invalid.length === 0, invalid.slice(0, 3).join(' | '));
+
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	for (const config of tables.difficultyTable) {
+		const count = tables.getFieldsForDifficulty(config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
+	}
+
+	// 미리 구해 둔 최소 이동 수가 솔버 결과와 맞는지 (표본 검사 - 전수는 느리다)
+	const solver = new RushHourSolver();
+	const mismatched: string[] = [];
+	for (const field of fields) {
+		if (field.minimumMoves < 0) {
+			continue;
+		}
+		const board = RushHourBoard.fromLevel(tables.buildLevel(field));
+		const solution = solver.solve(board, { maxStates: 200000, reconstructPath: false });
+		if (solution.isSolvable === false) {
+			continue;
+		}
+		if (solution.minimumMoves !== field.minimumMoves) {
+			mismatched.push(`${field.puzzleId}: solver=${solution.minimumMoves} table=${field.minimumMoves}`);
+		}
+	}
+	recorder.check('저장된 최소 이동 수가 솔버 결과와 일치', mismatched.length === 0, mismatched.slice(0, 3).join(' | '));
 }
 
 //#endregion

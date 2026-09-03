@@ -40,8 +40,11 @@ export const PIECE_METRICS_BY_DIVIDE: { [divide: number]: PieceMetrics } = {
 	4: { pieceSizeCm: 8.6, gapCm: 0.2 },
 };
 
-/** 이동 연출 시간 (초) - §6 "0.25초 동안 미끄러져 빈 칸으로 이동" */
-export const PIECE_MOVE_SECONDS = 0.25;
+/**
+ * 이동 연출 시간 (초). 기획서 §6 원안은 0.25초였으나 "터치 후 반응이 굼뜨다" 는
+ * 피드백으로 줄였다 - 이동 중 입력 잠금 시간도 그만큼 짧아져 연타가 빨라진다.
+ */
+export const PIECE_MOVE_SECONDS = 0.12;
 
 /** 완성 시 원본 이미지를 보여 주는 시간 (초) - §9 */
 export const SUCCESS_IMAGE_SECONDS = 1;

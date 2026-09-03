@@ -17,7 +17,7 @@ import { SwitchInputController } from 'Switch_InputController';
 import { SwitchLevelGenerator, describeSwitchLevel } from 'Switch_LevelGenerator';
 import { SwitchSession } from 'Switch_Session';
 import { SwitchSolver } from 'Switch_Solver';
-import { SwitchFieldTableEntry, SwitchPuzzleTables, validateFieldData, validateObjectTable } from 'Switch_DataTables';
+import { SWITCH_CSV_FIELD_TABLE, SwitchFieldTableEntry, SwitchPuzzleTables, validateFieldData, validateObjectTable } from 'Switch_DataTables';
 import {
 	BOARD_SPAWN_SECONDS,
 	ESwitchCellState,
@@ -82,6 +82,7 @@ export function runSwitchTests(): SwitchTestReport {
 	testDataValidation(recorder, tables);
 	testInputController(recorder);
 	testSession(recorder, tables);
+	testCsvFieldTable(recorder, tables);
 
 	let passed = 0;
 	let failed = 0;
@@ -151,8 +152,9 @@ function testMetrics(recorder: TestRecorder): void {
 	recorder.check('키 캡 조작 콜리전은 7cm (칸보다 넉넉한 히트박스)', KEY_CAP_COLLISION_CM === 7 && KEY_CAP_COLLISION_CM > KEY_CAP_SIZE_CM);
 	recorder.check('키 판 생성 연출은 1초', BOARD_SPAWN_SECONDS === 1);
 	recorder.check('초기 눌림 연출은 0.2초', Math.abs(INITIAL_PRESS_SECONDS - 0.2) < 1e-9);
-	recorder.check('영역 연출 딜레이는 0.2초', Math.abs(PRESS_AREA_DELAY_SECONDS - 0.2) < 1e-9);
-	recorder.check('누름 연출 전체는 0.4초', Math.abs(PRESS_SEQUENCE_SECONDS - 0.4) < 1e-9);
+	// 원안(§7)은 0.2초/0.4초였으나 모바일 체감 반응성을 위해 축소했다 (Switch_Definitions 주석)
+	recorder.check('영역 연출 딜레이는 0.05초', Math.abs(PRESS_AREA_DELAY_SECONDS - 0.05) < 1e-9);
+	recorder.check('누름 연출 전체는 0.12초', Math.abs(PRESS_SEQUENCE_SECONDS - 0.12) < 1e-9);
 
 	// §4 좌표 표기 A1~E5
 	recorder.check('좌표 0 은 A1', toCoordLabel(0) === 'A1');
@@ -268,25 +270,25 @@ function testPressRejections(recorder: TestRecorder): void {
 
 //#endregion
 
-//#region §7 연출 타이밍 - 0.0초 / 0.2초 / 0.4초
+//#region §7 연출 타이밍 - 0.0초 / 딜레이 / 시퀀스 종료 (값은 Switch_Definitions 상수)
 
 function testSequenceTiming(recorder: TestRecorder): void {
 	const board = new SwitchBoard(createFullGrid(ESwitchCellState.UNPRESSED), MASK_PLUS);
 	board.press(toPosition(2, 2));
 
-	// 0.1초 - 아직 아무 단계도 아님
-	let progress = board.update(0.1);
-	recorder.check('0.1초에는 영역 연출 전', progress.didReachAreaPhase === false && progress.didFinishSequence === false);
+	// 딜레이의 절반 - 아직 아무 단계도 아님
+	let progress = board.update(PRESS_AREA_DELAY_SECONDS / 2);
+	recorder.check('딜레이 전에는 영역 연출 전', progress.didReachAreaPhase === false && progress.didFinishSequence === false);
 
-	// 0.25초 - 영역 연출 단계 도달 (0.2초 경과)
-	progress = board.update(0.15);
-	recorder.check('0.2초 경과에 영역 연출 도달', progress.didReachAreaPhase === true);
-	recorder.check('0.25초에는 아직 종료 전', progress.didFinishSequence === false);
+	// 딜레이를 넘긴 시점 - 영역 연출 단계 도달, 아직 종료 전
+	progress = board.update(PRESS_AREA_DELAY_SECONDS);
+	recorder.check('딜레이 경과에 영역 연출 도달', progress.didReachAreaPhase === true);
+	recorder.check('시퀀스 종료 전에는 종료 신호 없음', progress.didFinishSequence === false);
 
-	// 0.45초 - 종료 (0.4초 경과)
-	progress = board.update(0.2);
+	// 시퀀스 길이만큼 더 - 종료
+	progress = board.update(PRESS_SEQUENCE_SECONDS);
 	recorder.check('영역 연출 신호는 한 번만', progress.didReachAreaPhase === false);
-	recorder.check('0.4초 경과에 연출 종료', progress.didFinishSequence === true);
+	recorder.check('시퀀스 경과에 연출 종료', progress.didFinishSequence === true);
 	recorder.check('종료 후 입력 재개', board.isInputAccepted === true);
 
 	// 큰 델타 하나로 두 단계를 한 번에 지나가도 둘 다 신호가 난다
@@ -605,14 +607,14 @@ function testSession(recorder: TestRecorder, tables: SwitchPuzzleTables): void {
 		const anyKey = session.board!.getPressablePositions()[0];
 		session.pressKey(anyKey);
 		recorder.check('누름 직후 KEY_PRESSED 만 발행', order.join(',') === 'pressed');
-		session.update(0.25);
-		recorder.check('0.2초 경과에 AREA_TOGGLED', order.join(',') === 'pressed,area');
-		session.update(0.25);
-		recorder.check('0.4초 경과에 PRESS_SEQUENCE_FINISHED', order.join(',') === 'pressed,area,finished');
+		session.update((PRESS_AREA_DELAY_SECONDS + PRESS_SEQUENCE_SECONDS) / 2);
+		recorder.check('딜레이 경과에 AREA_TOGGLED', order.join(',') === 'pressed,area');
+		session.update(PRESS_SEQUENCE_SECONDS);
+		recorder.check('시퀀스 경과에 PRESS_SEQUENCE_FINISHED', order.join(',') === 'pressed,area,finished');
 
 		// 연출 중 세션 경유 입력도 거절된다
 		session.pressKey(anyKey);
-		session.update(0.1);
+		session.update(PRESS_AREA_DELAY_SECONDS / 2);
 		const rejections: ESwitchRejection[] = [];
 		events.PRESS_REJECTED.subscribe((rejection) => rejections.push(rejection));
 		session.pressKey(anyKey);
@@ -694,6 +696,69 @@ function testSession(recorder: TestRecorder, tables: SwitchPuzzleTables): void {
 		session.startQuestByDifficulty(2);
 		const progress = session.getRoundProgress();
 		recorder.check('D2 는 2라운드', progress.total === 2 && progress.current === 1 && progress.cleared === 0);
+	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_08)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_08_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ *
+ * 이 퍼즐의 CSV 는 **초기 눌림 상태를 직접** 담고 있다(다른 퍼즐과 달리 역셔플로 만들지 않는다).
+ * 임의의 0/1 배치는 마스크에 따라 해가 없을 수 있으므로, 전 판의 해 존재를 반드시 확인해야 한다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: SwitchPuzzleTables): void {
+	const fields = SWITCH_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const generator = new SwitchLevelGenerator(tables);
+	const invalidData: string[] = [];
+	const failedGeneration: string[] = [];
+	const invalidLevel: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const violations = validateFieldData(field, tables);
+		if (violations.length > 0) {
+			invalidData.push(`${field.puzzleId}: ${violations.join(' / ')}`);
+			continue;
+		}
+
+		const level = generator.generate({
+			puzzleId: field.puzzleId,
+			difficulty: field.difficulty,
+			fieldIndex: field.index,
+			seed: 777,
+		});
+		if (level === undefined) {
+			failedGeneration.push(field.puzzleId);
+			continue;
+		}
+
+		// 검증기가 "해 존재 + 최소 해 <= shuffleCount" 를 함께 본다
+		const result = generator.validator.validate(level);
+		if (result.isValid === false) {
+			invalidLevel.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+
+	recorder.check('모든 CSV 필드 규격이 유효', invalidData.length === 0, invalidData.slice(0, 3).join(' | '));
+	recorder.check('모든 CSV 레벨이 생성됨', failedGeneration.length === 0, failedGeneration.slice(0, 5).join());
+	recorder.check('모든 CSV 레벨에 해가 존재하고 최소 해가 기록값과 맞음',
+		invalidLevel.length === 0, invalidLevel.slice(0, 3).join(' | '));
+
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	for (const config of tables.difficultyTable) {
+		const count = tables.fieldTable.filter((field) => field.difficulty === config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
 	}
 }
 

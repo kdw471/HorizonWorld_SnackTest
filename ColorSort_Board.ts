@@ -268,12 +268,15 @@ export class ColorSortBoard {
 	}
 
 	/**
-	 * 클리어 판정 - §10.5.
-	 * "모든 색이 각각 하나의 케이스에 4개로 모여 닫힘 상태가 되었는가"
+	 * 클리어 판정 - §2 / §4.
+	 * "건전지가 들어 있는 모든 케이스가 같은 색으로 가득 차 닫혔는가"
+	 *
+	 * 같은 색이 두 케이스에 나뉘어 있어도 각각 가득 찼다면 클리어다.
+	 * 기획 데이터(NPUZ_03)에는 한 색을 8개 쓰는 판이 13개 있어서,
+	 * 색마다 케이스 하나씩이라고 가정하면 그 판들은 애초에 끝낼 수 없다.
 	 */
 	public isSolved(): boolean {
 		let completeCount = 0;
-		const seenColors = new Set<EBatteryColor>();
 
 		for (const batteryCase of this._cases) {
 			if (batteryCase.isActive === false) {
@@ -285,13 +288,6 @@ export class ColorSortBoard {
 			if (isCaseComplete(batteryCase) === false) {
 				return false;
 			}
-
-			const color = batteryCase.batteries[0].color;
-			if (seenColors.has(color)) {
-				// 같은 색이 두 케이스에 나뉘어 있으면 정렬이 끝나지 않은 것이다
-				return false;
-			}
-			seenColors.add(color);
 			completeCount++;
 		}
 

@@ -26,6 +26,10 @@ export class Subscription implements EventSubscription {
 export class EventPublisher<T> {
 	private _counter: bigint = BigInt(0);
 	private _subscribedFunctions: Map<bigint, SubscribedFunction<T>> = new Map<bigint, SubscribedFunction<T>>();
+	// cached snapshot for publish(); rebuilt only when the subscriber set changes.
+	// publish() runs on hot paths (every cell change during a drag), so allocating
+	// a fresh array per call caused avoidable GC pressure.
+	private _publishList: SubscribedFunction<T>[] | null = null;
 
 	public get hasSubscriptions(): boolean { return this._subscribedFunctions.size > 0; }
 
@@ -34,16 +38,29 @@ export class EventPublisher<T> {
 		const counterCopy = this._counter;
 		this._subscribedFunctions.set(counterCopy, func);
 		this._counter += BigInt(1);
+		this._publishList = null;
 
 		// removes subscribed function when disconnect is called on the returned subscription
-		return new Subscription({ disconnect: () => this._subscribedFunctions.delete(counterCopy) });
+		return new Subscription({
+			disconnect: () => {
+				this._subscribedFunctions.delete(counterCopy);
+				this._publishList = null;
+			},
+		});
 	}
 
 	/** Iterates through bonded subscribed functions and calls them */
 	public publish(data: T): void {
 		if (this._subscribedFunctions.size <= 0) { return; }
 
-		const subscribedFunctions = Array.from(this._subscribedFunctions.values());
+		// snapshot semantics are preserved: a function that unsubscribes or subscribes
+		// during publish invalidates the cache, but this call keeps iterating the
+		// snapshot it started with - exactly what the per-call Array.from used to do.
+		let subscribedFunctions = this._publishList;
+		if (subscribedFunctions === null) {
+			subscribedFunctions = Array.from(this._subscribedFunctions.values());
+			this._publishList = subscribedFunctions;
+		}
 		for (let i = 0; i < subscribedFunctions.length; i++) {
 			const func = subscribedFunctions[i];
 			func(data);

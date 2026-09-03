@@ -26,8 +26,18 @@ export const LASER_PLACEMENT_GRID_SIZE = 5;
 export const LASER_PLACEMENT_ORIGIN = 1;
 export const LASER_PLACEMENT_MAX_INDEX = LASER_PLACEMENT_GRID_SIZE - 1;
 
-/** 인벤토리 슬롯 최대 개수 - §2 "플레이어가 사용할 수 있는 크리스탈 인벤토리: 최대 5개" */
-export const LASER_MAX_INVENTORY_SLOTS = 5;
+/**
+ * 인벤토리 슬롯 최대 개수.
+ *
+ * 기획서 §2 는 "최대 5개"로 적고 있으나, 실제 기획 데이터 테이블
+ * `NPUZ_01_FieldData.csv` 는 슬롯 컬럼을 `sUseMoveObjectID1..10` 10개로 두고
+ * 최대 9개까지 사용한다. 데이터 쪽이 더 최신이므로 상한을 10으로 맞춘다.
+ * (절차적 생성기는 난이도 테이블 값에 따라 여전히 5개 이하만 만든다)
+ */
+export const LASER_MAX_INVENTORY_SLOTS = 10;
+
+/** 기획서 §2 원문 상한. UI 슬롯 레이아웃 기준값으로만 참고한다 */
+export const LASER_SPEC_INVENTORY_SLOTS = 5;
 
 /** 광선 추적 시 허용하는 최대 세그먼트 수 (무한 루프 방어용 상한) */
 export const LASER_MAX_TRACE_SEGMENTS = 4096;

@@ -107,10 +107,11 @@ export class ColorSortPlacementValidator {
 			violations.push(`Spare cases must be ${MIN_SPARE_CASE_COUNT}~${MAX_SPARE_CASE_COUNT} (got ${emptyActiveCount}).`);
 		}
 
-		// 색상별 개수는 정확히 정원(4)의 배수여야 정렬이 끝날 수 있다
+		// 색상별 개수는 정원(4)의 배수여야 케이스를 가득 채워 닫을 수 있다.
+		// 기획 데이터에는 한 색을 8개(케이스 2개 분량) 쓰는 판도 있으므로 배수까지 허용한다.
 		for (const entry of Array.from(colorCounts.entries())) {
-			if (entry[1] !== CASE_CAPACITY) {
-				violations.push(`Color ${entry[0]} has ${entry[1]} batteries; exactly ${CASE_CAPACITY} are required.`);
+			if (entry[1] === 0 || entry[1] % CASE_CAPACITY !== 0) {
+				violations.push(`Color ${entry[0]} has ${entry[1]} batteries; a multiple of ${CASE_CAPACITY} is required.`);
 			}
 		}
 

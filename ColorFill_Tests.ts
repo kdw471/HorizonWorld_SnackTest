@@ -15,9 +15,9 @@ import { ColorFillAutoPlayBot } from 'ColorFill_AutoPlayBot';
 import { ColorFillDial, getSafeStartAngle } from 'ColorFill_Dial';
 import { ColorFillEvents } from 'ColorFill_GameEvents';
 import { ColorFillInputController } from 'ColorFill_InputController';
-import { ColorFillLevelGenerator, describeColorFillLevel } from 'ColorFill_LevelGenerator';
+import { ColorFillLevelGenerator, ColorFillPlacementValidator, describeColorFillLevel } from 'ColorFill_LevelGenerator';
 import { ColorFillSession } from 'ColorFill_Session';
-import { ColorFillTables } from 'ColorFill_DataTables';
+import { COLORFILL_CSV_FIELD_TABLE, ColorFillTables } from 'ColorFill_DataTables';
 import {
 	DEGREES_PER_SLOT,
 	DIAL_SLOT_COUNT,
@@ -64,6 +64,7 @@ export function runColorFillTests(): ColorFillTestReport {
 	testClearCondition(recorder);
 	testGeneration(recorder, tables);
 	testAutoPlayBot(recorder, tables);
+	testCsvFieldTable(recorder, tables);
 	testSession(recorder, tables);
 
 	let passed = 0;
@@ -371,9 +372,13 @@ function testAutoPlayBot(recorder: TestRecorder, tables: ColorFillTables): void 
 			continue;
 		}
 
+		// 반응 시간 0.2초 기준.
+		// 기획 CSV(NPUZ_04)의 회전 속도를 그대로 쓰면 난이도 6 은 720도/초 + 1칸 덩어리라
+		// 노출 시간이 한 칸당 28ms 뿐이고, 0.3초 반응으로는 164판 중 9판만 클리어된다.
+		// 자세한 측정치는 Documents/생성 문서/데이터 테이블 구조/PUZ_04_색채우기_데이터테이블_적용.md 참조.
 		const play = bot.play(ColorFillDial.fromLevel(generated), {
 			timeLimitSeconds: config.timeLimitSeconds,
-			reactionSeconds: 0.4,
+			reactionSeconds: 0.2,
 		});
 		recorder.check(`난이도 ${config.difficulty} 봇이 제한 시간 내 클리어`, play.didClear,
 			`${play.elapsedSeconds.toFixed(1)}s / 제한 ${config.timeLimitSeconds}s, 남은 오염 ${play.remainingContaminated}`);
@@ -408,7 +413,9 @@ function testSession(recorder: TestRecorder, tables: ColorFillTables): void {
 		const session = new ColorFillSession(events, tables, generator, { seed: 90001 });
 		recorder.check('퀘스트 시작', session.startQuest('QUEST_COLORFILL_D1'));
 		recorder.check('입력 대기 상태로 진입', session.state === EColorFillState.PLAYER_INPUT, session.state);
-		recorder.check('제한시간이 테이블에서 적용됨', session.getRemainingTimeSeconds() === 15);
+		recorder.check('제한시간이 테이블에서 적용됨',
+		session.getRemainingTimeSeconds() === (tables.getDifficultyConfig(1)?.timeLimitSeconds ?? -1),
+		`${session.getRemainingTimeSeconds()}`);
 		recorder.check('남은 오염 칸을 조회할 수 있다', session.getRemainingContaminatedCount() > 0);
 
 		const step = 1 / 60;
@@ -459,6 +466,58 @@ function testSession(recorder: TestRecorder, tables: ColorFillTables): void {
 		session.resume();
 		session.update(0.5);
 		recorder.check('재개하면 다시 회전한다', Math.abs((session.dial?.needle.angleDeg ?? 0) - angleBefore) > 1e-9);
+	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_04)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_04_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ *
+ * 이 퍼즐의 CSV 는 오염 덩어리의 **칸 수만** 담고 있어서(각도 정보 없음)
+ * 변환기가 18칸 위에 배치한다. 그 결과가 다이얼 규격을 지키는지 여기서 확인한다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: ColorFillTables): void {
+	const fields = COLORFILL_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const validator = new ColorFillPlacementValidator();
+	const bot = new ColorFillAutoPlayBot();
+	const invalid: string[] = [];
+	const notCleared: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const level = tables.buildLevel(field);
+
+		// 난이도 설정과 대조하지 않는다. 판마다 덩어리 구성과 활성 칸 수가 다르기 때문이다
+		const result = validator.validate(level);
+		if (result.isValid === false) {
+			invalid.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+
+		// 반응 0.2초면 기획 판 전부가 클리어 가능해야 한다 (그보다 느리면 난이도 6이 무너진다)
+		const play = bot.play(ColorFillDial.fromLevel(level), { timeLimitSeconds: 120, reactionSeconds: 0.2 });
+		if (play.didClear === false) {
+			notCleared.push(field.puzzleId);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+
+	recorder.check('모든 CSV 레벨이 다이얼 규격을 만족', invalid.length === 0, invalid.slice(0, 3).join(' | '));
+	recorder.check('반응 0.2초 봇이 모든 CSV 레벨을 클리어', notCleared.length === 0, notCleared.slice(0, 5).join());
+
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	for (const config of tables.difficultyTable) {
+		const count = tables.getFieldsForDifficulty(config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
 	}
 }
 

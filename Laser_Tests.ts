@@ -16,10 +16,10 @@ import { LaserBeamTracer } from 'Laser_BeamTracer';
 import { LaserBoard } from 'Laser_Board';
 import { LaserDragController } from 'Laser_DragController';
 import { LaserEvents } from 'Laser_GameEvents';
-import { LaserLevelGenerator } from 'Laser_LevelGenerator';
+import { LaserLevelGenerator, LaserPlacementValidator } from 'Laser_LevelGenerator';
 import { LaserSession } from 'Laser_Session';
 import { LaserSolver } from 'Laser_Solver';
-import { LaserTables } from 'Laser_DataTables';
+import { DEFAULT_LASER_FIELD_TABLE, LASER_CSV_FIELD_TABLE, LaserTables } from 'Laser_DataTables';
 import {
 	ECrystalType,
 	EGimmickType,
@@ -58,15 +58,23 @@ class TestRecorder {
 
 export function runLaserTests(): LaserTestReport {
 	const recorder = new TestRecorder();
+
+	// 실제 운영 테이블 - 기획 CSV(NPUZ_01) 가 들어 있다
 	const tables = new LaserTables();
 
+	// 손으로 배치하고 검증한 1수짜리 샘플 한 판만 담은 테이블.
+	// 조작·솔버·세션 테스트는 결과가 결정적이어야 하므로 이쪽을 쓴다.
+	const sampleTables = new LaserTables();
+	sampleTables.loadFieldTable(DEFAULT_LASER_FIELD_TABLE);
+
 	testCrystalBehaviour(recorder);
-	testSampleLevel(recorder, tables);
+	testSampleLevel(recorder, sampleTables);
 	testExceptions(recorder);
 	testLoopPrevention(recorder);
-	testSolverAndGenerator(recorder, tables);
-	testDragInteraction(recorder, tables);
-	testSession(recorder, tables);
+	testSolverAndGenerator(recorder, sampleTables);
+	testDragInteraction(recorder, sampleTables);
+	testSession(recorder, sampleTables);
+	testCsvFieldTable(recorder, tables);
 
 	let passed = 0;
 	let failed = 0;
@@ -281,6 +289,7 @@ function testSolverAndGenerator(recorder: TestRecorder, tables: LaserTables): vo
 	const generator = new LaserLevelGenerator(tables);
 
 	const field = tables.getField('LZ_D1_001');
+	recorder.check('솔버 테스트용 샘플 필드 LZ_D1_001 존재', field !== undefined);
 	if (field !== undefined) {
 		const level = tables.buildLevel(field);
 		const solution = solver.solve(LaserBoard.fromLevel(level));
@@ -338,6 +347,7 @@ function testSolverAndGenerator(recorder: TestRecorder, tables: LaserTables): vo
 function testDragInteraction(recorder: TestRecorder, tables: LaserTables): void {
 	const field = tables.getField('LZ_D1_001');
 	if (field === undefined) {
+		recorder.check('드래그 테스트용 샘플 필드 LZ_D1_001 존재', false);
 		return;
 	}
 
@@ -441,6 +451,57 @@ function testSession(recorder: TestRecorder, tables: LaserTables): void {
 		resetSession.resetPlacements();
 		recorder.check('리셋하면 모두 회수된다', board.inventory.length === inventoryBefore && board.placedCrystals.length === 0);
 	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_01)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_01_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ * CSV 를 갱신했을 때 규칙을 깨는 행이 섞여 들어오면 여기서 잡힌다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: LaserTables): void {
+	const fields = LASER_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const validator = new LaserPlacementValidator();
+	const invalid: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const level = tables.buildLevel(field);
+		const result = validator.validate(level);
+		if (result.isValid === false) {
+			invalid.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+
+	recorder.check('모든 CSV 레벨이 배치 규칙을 만족', invalid.length === 0, invalid.slice(0, 3).join(' | '));
+
+	// 난이도 테이블에 없는 난이도의 판이 있으면 세션이 퀘스트를 못 찾는다
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	// 반대로 난이도 테이블에만 있고 판이 없으면 절차적 생성기로 폴백한다 (실패가 아님)
+	for (const config of tables.difficultyTable) {
+		const count = tables.getFieldsForDifficulty(config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
+	}
+
+	// 시작부터 클리어 상태인 판이 있으면 라운드가 즉시 끝나 버린다
+	const tracer = new LaserBeamTracer();
+	const preSolved: string[] = [];
+	for (const field of fields) {
+		if (tracer.traceAndCheck(LaserBoard.fromLevel(tables.buildLevel(field))).isSolved) {
+			preSolved.push(field.puzzleId);
+		}
+	}
+	recorder.check('시작부터 클리어된 판이 없다', preSolved.length === 0, preSolved.join());
 }
 
 //#endregion

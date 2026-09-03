@@ -15,7 +15,7 @@ import { SlidePuzzleEvents } from 'SlidePuzzle_GameEvents';
 import { SlidePuzzleInputController } from 'SlidePuzzle_InputController';
 import { SlidePuzzleLevelGenerator, describeSlideLevel } from 'SlidePuzzle_LevelGenerator';
 import { SlidePuzzleSession } from 'SlidePuzzle_Session';
-import { SlideFieldTableEntry, SlidePuzzleTables, validateFieldData } from 'SlidePuzzle_DataTables';
+import { SLIDEPUZZLE_CSV_FIELD_TABLE, SlideFieldTableEntry, SlidePuzzleTables, validateFieldData } from 'SlidePuzzle_DataTables';
 import {
 	COMPLETED_IMAGE_SIZE_CM,
 	ESlideInputState,
@@ -66,6 +66,7 @@ export function runSlidePuzzleTests(): SlideTestReport {
 	testMultiTouch(recorder);
 	testGeneration(recorder, tables);
 	testSession(recorder, tables);
+	testCsvFieldTable(recorder, tables);
 
 	let passed = 0;
 	let failed = 0;
@@ -86,7 +87,8 @@ function testMetrics(recorder: TestRecorder): void {
 	recorder.check('완성 이미지는 35cm', COMPLETED_IMAGE_SIZE_CM === 35);
 	recorder.check('조각 두께는 4cm', PIECE_THICKNESS_CM === 4);
 	recorder.check('인터랙션 영역 높이는 7cm', PIECE_INTERACTION_HEIGHT_CM === 7);
-	recorder.check('이동 연출은 0.25초', Math.abs(PIECE_MOVE_SECONDS - 0.25) < 1e-9);
+	// 원안(§6)은 0.25초였으나 모바일 체감 반응성을 위해 축소했다 (SlidePuzzle_Definitions 주석)
+	recorder.check('이동 연출은 0.12초', Math.abs(PIECE_MOVE_SECONDS - 0.12) < 1e-9);
 	recorder.check('호버 Emissive 색상은 #FF5C41', HOVER_EMISSIVE_COLOR === '#FF5C41');
 
 	const three = getPieceMetrics(3);
@@ -444,6 +446,68 @@ function testSession(recorder: TestRecorder, tables: SlidePuzzleTables): void {
 		session.resume();
 		session.update(1);
 		recorder.check('재개하면 다시 흐른다', session.getRemainingTimeSeconds() < before);
+	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_07)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_07_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ *
+ * 이 퍼즐의 CSV 는 (이미지 / 분할 개수 / 섞는 횟수) 세 값뿐이라,
+ * 확인할 것은 "그 값으로 실제 레벨이 만들어지고 항상 풀 수 있는가" 다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: SlidePuzzleTables): void {
+	const fields = SLIDEPUZZLE_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const generator = new SlidePuzzleLevelGenerator(tables);
+	const invalidData: string[] = [];
+	const failedGeneration: string[] = [];
+	const invalidLevel: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const violations = validateFieldData(field, tables);
+		if (violations.length > 0) {
+			invalidData.push(`${field.puzzleId}: ${violations.join(' / ')}`);
+			continue;
+		}
+
+		const level = generator.generate({
+			puzzleId: field.puzzleId,
+			difficulty: field.difficulty,
+			fieldIndex: field.index,
+			seed: 4242,
+		});
+		if (level === undefined) {
+			failedGeneration.push(field.puzzleId);
+			continue;
+		}
+
+		// 셔플은 합법 이동만 쓰므로 언제나 풀 수 있어야 한다 (§8)
+		const result = generator.validator.validate(level);
+		if (result.isValid === false) {
+			invalidLevel.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+
+	recorder.check('모든 CSV 필드 규격이 유효', invalidData.length === 0, invalidData.slice(0, 3).join(' | '));
+	recorder.check('모든 CSV 레벨이 생성됨', failedGeneration.length === 0, failedGeneration.slice(0, 5).join());
+	recorder.check('생성된 레벨이 전부 풀 수 있는 배치', invalidLevel.length === 0, invalidLevel.slice(0, 3).join(' | '));
+
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	for (const config of tables.difficultyTable) {
+		const count = tables.fieldTable.filter((field) => field.difficulty === config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
 	}
 }
 

@@ -31,6 +31,7 @@ import {
 	getUsablePositions,
 	isGridSolved,
 	parseKeyLayout,
+	parseKeyStates,
 	pickRandom,
 } from 'Switch_Definitions';
 
@@ -184,6 +185,18 @@ export class SwitchLevelGenerator {
 		const mask = this._tables.getMask(field.switchAreaId);
 		if (usable === undefined || mask === undefined) {
 			return undefined;
+		}
+
+		// 기획 CSV 행은 초기 배치를 직접 들고 있다. 그대로 로드한다.
+		if (field.initialRows !== undefined) {
+			const grid = parseKeyStates(field.initialRows);
+			if (grid === undefined) {
+				return undefined;
+			}
+			const board = new SwitchBoard(grid, mask, 0, 0);
+			// 역셔플로 만든 배치가 아니므로 누른 위치 목록은 없다.
+			// shuffleCount 에는 미리 검증한 최소 누름 수가 들어 있다.
+			return board.toLevel(field.puzzleId, field.difficulty, field.switchAreaId, field.shuffleCount, []);
 		}
 
 		// §9.4 - 목표 상태(모두 눌림)에서 서로 다른 칸 K개를 눌러 역방향으로 흐트러뜨린다

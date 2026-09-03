@@ -13,10 +13,10 @@
 import { ColorSortBoard, createCases } from 'ColorSort_Board';
 import { ColorSortDragController } from 'ColorSort_DragController';
 import { ColorSortEvents } from 'ColorSort_GameEvents';
-import { ColorSortLevelGenerator } from 'ColorSort_LevelGenerator';
+import { ColorSortLevelGenerator, ColorSortPlacementValidator } from 'ColorSort_LevelGenerator';
 import { ColorSortSession } from 'ColorSort_Session';
 import { ColorSortSolver } from 'ColorSort_Solver';
-import { ColorSortTables } from 'ColorSort_DataTables';
+import { COLORSORT_CSV_FIELD_TABLE, ColorSortTables } from 'ColorSort_DataTables';
 import {
 	Battery,
 	BatteryCase,
@@ -62,6 +62,7 @@ export function runColorSortTests(): ColorSortTestReport {
 	testDragInteraction(recorder);
 	testGeneration(recorder, tables);
 	testSession(recorder, tables);
+	testCsvFieldTable(recorder, tables);
 
 	let passed = 0;
 	let failed = 0;
@@ -514,6 +515,58 @@ function testSession(recorder: TestRecorder, tables: ColorSortTables): void {
 				recorder.check('리스폰 후 잠금 해제', board.getCaseState(sourceIndex) === ECaseState.OPEN);
 			}
 		}
+	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_03)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_03_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ * CSV 를 갱신했을 때 규칙을 깨는 행이 섞여 들어오면 여기서 잡힌다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: ColorSortTables): void {
+	const fields = COLORSORT_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const validator = new ColorSortPlacementValidator();
+	const solver = new ColorSortSolver();
+	const invalid: string[] = [];
+	const unsolved: string[] = [];
+	const preSolved: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const level = tables.buildLevel(field);
+		const result = validator.validate(level);
+		if (result.isValid === false) {
+			invalid.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+
+		const board = ColorSortBoard.fromLevel(level);
+		if (board.isSolved()) {
+			preSolved.push(field.puzzleId);
+		}
+		if (solver.solve(board, { maxStates: 400000, maxDepth: 200 }).isSolvable === false) {
+			unsolved.push(field.puzzleId);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+
+	recorder.check('모든 CSV 레벨이 배치 규칙을 만족', invalid.length === 0, invalid.slice(0, 3).join(' | '));
+	recorder.check('시작부터 클리어된 판이 없다', preSolved.length === 0, preSolved.join());
+	recorder.check('모든 CSV 레벨에 해가 존재', unsolved.length === 0, unsolved.slice(0, 5).join());
+
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	for (const config of tables.difficultyTable) {
+		const count = tables.getFieldsForDifficulty(config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
 	}
 }
 

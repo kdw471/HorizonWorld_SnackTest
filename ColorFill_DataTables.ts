@@ -15,6 +15,10 @@ import {
 	ESlotState,
 	cloneSlot,
 } from 'ColorFill_Definitions';
+import { COLORFILL_CSV_FIELD_TABLE, COLORFILL_CSV_OBJECT_ROWS } from 'ColorFill_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { COLORFILL_CSV_FIELD_TABLE };
 
 //#region Table types
 
@@ -125,6 +129,26 @@ export const DEFAULT_COLOR_FILL_OBJECT_TABLE: ColorFillObjectTableEntry[] = [
 ];
 
 /**
+ * 기획 CSV(`NPUZ_04_ObjectData.csv`) 2행을 오브젝트 테이블 행으로 변환한 것.
+ *
+ * 원본에는 활성화 다이얼 / 비활성화 다이얼 두 행만 있고 메쉬 경로는 아직 `FREE`(미정)다.
+ * 기본 행 뒤에 붙으므로 `getObject('DIAL_SLOT')` 같은 기존 조회는 그대로 동작한다.
+ */
+export const COLOR_FILL_CSV_OBJECT_TABLE: ColorFillObjectTableEntry[] = COLORFILL_CSV_OBJECT_ROWS.map((row) => ({
+	objectId: row.objectId,
+	description: row.description,
+	resource: {
+		meshPath: row.meshPath === 'FREE' ? '' : row.meshPath,
+		materialId: PURIFY_MATERIAL_ID,
+		scalarParameterName: PURIFY_SCALAR_PARAMETER,
+	},
+	stateVisuals: {
+		[ESlotState.CONTAMINATED]: { materialId: PURIFY_MATERIAL_ID, mainColor: 0, vfxId: '', sfxId: '' },
+		[ESlotState.CLEAN]: { materialId: PURIFY_MATERIAL_ID, mainColor: 1, vfxId: 'Purify', sfxId: 'Purify' },
+	},
+}));
+
+/**
  * 난이도 테이블 초기값.
  *
  * ## 사양 §4 표의 모순과 그 처리
@@ -144,9 +168,20 @@ export const DEFAULT_COLOR_FILL_OBJECT_TABLE: ColorFillObjectTableEntry[] = [
  *   - 난이도 6: 활성 6  < 오염 2+2+2+2 = 8
  *
  * 원본 PDF 표가 옮겨지며 어긋난 것으로 보인다.
- * 여기서는 난이도 곡선을 결정하는 **오염 덩어리 구성(그룹 수와 크기)을 정본으로 삼고**,
- * 활성 칸 수는 그것을 담을 수 있도록 맞췄다. 덩어리가 많아질수록 어려워지는 의도는 그대로다.
- * 실제 표 값이 확인되면 이 테이블만 교체하면 된다.
+ *
+ * ## 기획 데이터 테이블(NPUZ_04)로 대체했다
+ *
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_04_FieldData.csv` 164판의 실측값이 정본이다.
+ * 아래 값은 그 통계(난이도별 최빈 구성 / 실제 회전 속도 / iCount)로 채웠다.
+ *
+ * | 난이도 | 1 | 2 | 3 | 4 | 5 | 6 |
+ * | 판 수 | 13 | 19 | 27 | 13 | 28 | 64 |
+ * | 덩어리 수 | 2 | 3 | 3 | 4 | 5 | 6 |
+ * | 최빈 구성 | 6/7 | 4/5/6 | 3/4/5 | 3/3/4/4 | 2/2/2/3/3 | 1/1/1/2/2/2 |
+ * (난이도 4만 생성기 여유를 위해 3/3/3/4 로 낮춰 잡았다)
+ * | 회전 속도 | 180 | 270 | 360 | 450 | 540 | 720 |
+ *
+ * 이 테이블은 이제 **절차적 생성기 전용**이다. 실제 플레이 판은 기획 CSV 에서 나온다.
  *
  * ## 제한 시간은 실측으로 잡았다
  *
@@ -162,59 +197,58 @@ export const DEFAULT_COLOR_FILL_OBJECT_TABLE: ColorFillObjectTableEntry[] = [
 export const DEFAULT_COLOR_FILL_DIFFICULTY_TABLE: ColorFillDifficultyConfig[] = [
 	{
 		difficulty: 1,
-		timeLimitSeconds: 15,
-		roundCount: 1,
-		activeSlotCount: 12,
-		contaminationGroupSizes: [12],
-		needleSpeedDegPerSec: 90,
+		timeLimitSeconds: 20,
+		roundCount: 3,
+		activeSlotCount: 13,
+		contaminationGroupSizes: [6, 7],
+		needleSpeedDegPerSec: 180,
 		reverseDelaySeconds: 0.3,
 	},
 	{
 		difficulty: 2,
-		timeLimitSeconds: 15,
-		roundCount: 1,
-		activeSlotCount: 10,
-		contaminationGroupSizes: [10],
-		needleSpeedDegPerSec: 110,
+		timeLimitSeconds: 22,
+		roundCount: 3,
+		activeSlotCount: 15,
+		contaminationGroupSizes: [4, 5, 6],
+		needleSpeedDegPerSec: 270,
 		reverseDelaySeconds: 0.3,
 	},
 	{
 		difficulty: 3,
-		timeLimitSeconds: 18,
-		roundCount: 2,
-		activeSlotCount: 8,
-		contaminationGroupSizes: [8],
-		needleSpeedDegPerSec: 130,
+		timeLimitSeconds: 24,
+		roundCount: 3,
+		activeSlotCount: 12,
+		contaminationGroupSizes: [3, 4, 5],
+		needleSpeedDegPerSec: 360,
 		reverseDelaySeconds: 0.35,
 	},
 	{
+		// CSV 최빈 구성은 3/3/4/4(합 14)지만 그러면 18칸이 꽉 차 여백이 칸마다 1개뿐이라
+		// 생성기가 만들 수 있는 배치가 사실상 하나뿐이 된다. 여유를 두려고 합 13짜리 구성을 쓴다.
 		difficulty: 4,
-		timeLimitSeconds: 22,
-		roundCount: 2,
-		// 원본은 활성 8 / 오염 5+5. 오염을 담을 수 있도록 활성을 10으로 올렸다.
-		activeSlotCount: 10,
-		contaminationGroupSizes: [5, 5],
-		needleSpeedDegPerSec: 130,
+		timeLimitSeconds: 26,
+		roundCount: 3,
+		activeSlotCount: 13,
+		contaminationGroupSizes: [3, 3, 3, 4],
+		needleSpeedDegPerSec: 450,
 		reverseDelaySeconds: 0.35,
 	},
 	{
 		difficulty: 5,
-		timeLimitSeconds: 26,
+		timeLimitSeconds: 28,
 		roundCount: 3,
-		// 원본은 활성 6 / 오염 3+3+3. 활성을 9로 올렸다.
-		activeSlotCount: 9,
-		contaminationGroupSizes: [3, 3, 3],
-		needleSpeedDegPerSec: 150,
+		activeSlotCount: 12,
+		contaminationGroupSizes: [2, 2, 2, 3, 3],
+		needleSpeedDegPerSec: 540,
 		reverseDelaySeconds: 0.4,
 	},
 	{
 		difficulty: 6,
 		timeLimitSeconds: 30,
 		roundCount: 3,
-		// 원본은 활성 6 / 오염 2+2+2+2. 활성을 8로 올렸다.
-		activeSlotCount: 8,
-		contaminationGroupSizes: [2, 2, 2, 2],
-		needleSpeedDegPerSec: 160,
+		activeSlotCount: 9,
+		contaminationGroupSizes: [1, 1, 1, 2, 2, 2],
+		needleSpeedDegPerSec: 720,
 		reverseDelaySeconds: 0.4,
 	},
 ];
@@ -222,13 +256,22 @@ export const DEFAULT_COLOR_FILL_DIFFICULTY_TABLE: ColorFillDifficultyConfig[] = 
 /** 필드 테이블 초기값. 비어 있으면 레벨 생성기가 런타임에 만든다 (PUZ_00 §7.3) */
 export const DEFAULT_COLOR_FILL_FIELD_TABLE: ColorFillFieldTableEntry[] = [];
 
+/**
+ * 실제로 쓰는 필드 테이블.
+ *
+ * 기획 CSV(`ColorFill_FieldData.ts`)가 있으면 그것을 쓴다.
+ * 난이도에 해당하는 행이 하나도 없으면 세션이 절차적 생성기로 폴백한다.
+ */
+export const COLOR_FILL_FIELD_TABLE: ColorFillFieldTableEntry[] =
+	COLORFILL_CSV_FIELD_TABLE.length > 0 ? COLORFILL_CSV_FIELD_TABLE : DEFAULT_COLOR_FILL_FIELD_TABLE;
+
 export const DEFAULT_COLOR_FILL_MAIN_TABLE: ColorFillMainTableEntry[] = DEFAULT_COLOR_FILL_DIFFICULTY_TABLE.map((config) => ({
 	questId: `QUEST_COLORFILL_D${config.difficulty}`,
 	questName: `금고 풀기 D${config.difficulty}`,
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_COLOR_FILL_FIELD_TABLE
+	puzzleIds: COLOR_FILL_FIELD_TABLE
 		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
@@ -240,8 +283,8 @@ export const DEFAULT_COLOR_FILL_MAIN_TABLE: ColorFillMainTableEntry[] = DEFAULT_
 export class ColorFillTables {
 	private _mainTable: ColorFillMainTableEntry[] = DEFAULT_COLOR_FILL_MAIN_TABLE;
 	private _difficultyTable: ColorFillDifficultyConfig[] = DEFAULT_COLOR_FILL_DIFFICULTY_TABLE;
-	private _fieldTable: ColorFillFieldTableEntry[] = DEFAULT_COLOR_FILL_FIELD_TABLE;
-	private _objectTable: ColorFillObjectTableEntry[] = DEFAULT_COLOR_FILL_OBJECT_TABLE;
+	private _fieldTable: ColorFillFieldTableEntry[] = COLOR_FILL_FIELD_TABLE;
+	private _objectTable: ColorFillObjectTableEntry[] = DEFAULT_COLOR_FILL_OBJECT_TABLE.concat(COLOR_FILL_CSV_OBJECT_TABLE);
 
 	public loadMainTable(entries: ColorFillMainTableEntry[]): void {
 		this._mainTable = entries;

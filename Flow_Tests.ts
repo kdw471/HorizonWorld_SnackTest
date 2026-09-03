@@ -14,10 +14,10 @@
 import { FlowBoard } from 'Flow_Board';
 import { FlowDragController } from 'Flow_DragController';
 import { FlowEvents } from 'Flow_GameEvents';
-import { FlowLevelGenerator, describeFlowLevel } from 'Flow_LevelGenerator';
+import { FlowLevelGenerator, FlowPlacementValidator, describeFlowLevel } from 'Flow_LevelGenerator';
 import { FlowSession } from 'Flow_Session';
 import { FlowSolver } from 'Flow_Solver';
-import { FlowTables, FLOW_TILE_MASKS } from 'Flow_DataTables';
+import { FLOW_CSV_FIELD_TABLE, FlowTables, FLOW_TILE_MASKS } from 'Flow_DataTables';
 import {
 	EExtendRejection,
 	EFlowColor,
@@ -63,6 +63,7 @@ export function runFlowTests(): FlowTestReport {
 	testGeneration(recorder, tables);
 	testSolver(recorder, tables);
 	testSession(recorder, tables);
+	testCsvFieldTable(recorder, tables);
 
 	let passed = 0;
 	let failed = 0;
@@ -593,6 +594,58 @@ function testSession(recorder: TestRecorder, tables: FlowTables): void {
 			session.clearAll();
 			recorder.check('전체 지우면 원상 복구된다', board.getUncoloredSubCount() === before);
 		}
+	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_05)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_05_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ *
+ * 이 데이터에는 **한 필드 위에 서로 떨어진 독립 보드가 여러 개** 있는 판이 24개 있다.
+ * 그런 판도 각 영역 안에서 색 쌍이 완결되므로 규칙상 문제가 없다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: FlowTables): void {
+	const fields = FLOW_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+	recorder.check('운영 테이블이 CSV 를 쓴다', tables.fieldTable.length === fields.length);
+
+	const validator = new FlowPlacementValidator();
+	const solver = new FlowSolver();
+	const invalid: string[] = [];
+	const unsolved: string[] = [];
+	const difficulties: number[] = [];
+
+	for (const field of fields) {
+		const level = tables.buildLevel(field);
+		if (level === undefined) {
+			invalid.push(`${field.puzzleId}: buildLevel returned undefined`);
+			continue;
+		}
+
+		const result = validator.validate(level);
+		if (result.isValid === false) {
+			invalid.push(`${field.puzzleId}: ${result.violations.join(' / ')}`);
+		}
+		if (solver.solve(FlowBoard.fromLevel(level), { maxStates: 800000 }).isSolvable === false) {
+			unsolved.push(field.puzzleId);
+		}
+		if (difficulties.indexOf(field.difficulty) < 0) {
+			difficulties.push(field.difficulty);
+		}
+	}
+
+	recorder.check('모든 CSV 레벨이 배치 규칙을 만족', invalid.length === 0, invalid.slice(0, 3).join(' | '));
+	recorder.check('모든 CSV 레벨에 해가 존재', unsolved.length === 0, unsolved.slice(0, 5).join());
+
+	const orphans = difficulties.filter((difficulty) => tables.getDifficultyConfig(difficulty) === undefined);
+	recorder.check('모든 난이도가 난이도 테이블에 있다', orphans.length === 0, orphans.join());
+
+	for (const config of tables.difficultyTable) {
+		const count = tables.getFieldsForDifficulty(config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 판이 존재`, count > 0, `${count}`);
 	}
 }
 

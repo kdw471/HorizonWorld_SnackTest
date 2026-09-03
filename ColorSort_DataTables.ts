@@ -20,6 +20,10 @@ import {
 	TOTAL_CASE_COUNT,
 	cloneCase,
 } from 'ColorSort_Definitions';
+import { COLORSORT_CSV_FIELD_TABLE, COLORSORT_CSV_OBJECT_ROWS } from 'ColorSort_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { COLORSORT_CSV_FIELD_TABLE };
 
 //#region Table types
 
@@ -130,6 +134,22 @@ export const DEFAULT_COLOR_SORT_OBJECT_TABLE: ColorSortObjectTableEntry[] = [
 })));
 
 /**
+ * 기획 CSV(`NPUZ_03_ObjectData.csv`) 18행을 오브젝트 테이블 행으로 변환한 것.
+ *
+ * 위의 종류별 기본 행과 달리 **실제 오브젝트 ID와 스태틱 메쉬 경로**를 들고 있다.
+ * 기본 행 뒤에 붙이므로 `getObject('BATTERY_RED')` 같은 기존 조회는 그대로 동작하고,
+ * `getObject('4200101001')` 처럼 기획 ID 로도 찾을 수 있다.
+ */
+export const COLOR_SORT_CSV_OBJECT_TABLE: ColorSortObjectTableEntry[] = COLORSORT_CSV_OBJECT_ROWS.map((row) => ({
+	objectId: row.objectId,
+	description: row.description,
+	resource: { meshPath: row.meshPath, scale: 1 },
+	stateVisuals: row.category === '00'
+		? makeCaseVisuals(`Obj_${row.objectId}`)
+		: makeBatteryVisuals(EBatteryColor.GRAY),
+}));
+
+/**
  * 난이도 테이블 초기값.
  *
  * 주의: `colorCount + spareCaseCount` 는 전체 케이스 수(8, §3)를 넘을 수 없고,
@@ -183,10 +203,30 @@ export const DEFAULT_COLOR_SORT_DIFFICULTY_TABLE: ColorSortDifficultyConfig[] = 
 		shuffleMoveCount: 50,
 		unknownBatteryCount: 3,
 	},
+	{
+		// 기획 CSV 최고 난이도. 필드 테이블에 10판이 들어 있고 그 실측값에 맞췄다
+		// (케이스 8개 전부 활성 / 색 4~7종 / 블랙 건전지 21개 = 채워진 케이스마다 3개씩).
+		difficulty: 6,
+		timeLimitSeconds: 270,
+		roundCount: 3,
+		colorCount: 7,
+		spareCaseCount: MIN_SPARE_CASE_COUNT,
+		shuffleMoveCount: 60,
+		unknownBatteryCount: 3,
+	},
 ];
 
 /** 필드 테이블 초기값. 비어 있으면 레벨 생성기가 런타임에 만든다 (PUZ_00 §7.3) */
 export const DEFAULT_COLOR_SORT_FIELD_TABLE: ColorSortFieldTableEntry[] = [];
+
+/**
+ * 실제로 쓰는 필드 테이블.
+ *
+ * 기획 CSV(`ColorSort_FieldData.ts`)가 있으면 그것을 쓴다.
+ * 난이도에 해당하는 행이 하나도 없으면 세션이 절차적 생성기로 폴백한다.
+ */
+export const COLOR_SORT_FIELD_TABLE: ColorSortFieldTableEntry[] =
+	COLORSORT_CSV_FIELD_TABLE.length > 0 ? COLORSORT_CSV_FIELD_TABLE : DEFAULT_COLOR_SORT_FIELD_TABLE;
 
 export const DEFAULT_COLOR_SORT_MAIN_TABLE: ColorSortMainTableEntry[] = DEFAULT_COLOR_SORT_DIFFICULTY_TABLE.map((config) => ({
 	questId: `QUEST_COLORSORT_D${config.difficulty}`,
@@ -194,7 +234,7 @@ export const DEFAULT_COLOR_SORT_MAIN_TABLE: ColorSortMainTableEntry[] = DEFAULT_
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_COLOR_SORT_FIELD_TABLE
+	puzzleIds: COLOR_SORT_FIELD_TABLE
 		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
@@ -206,8 +246,8 @@ export const DEFAULT_COLOR_SORT_MAIN_TABLE: ColorSortMainTableEntry[] = DEFAULT_
 export class ColorSortTables {
 	private _mainTable: ColorSortMainTableEntry[] = DEFAULT_COLOR_SORT_MAIN_TABLE;
 	private _difficultyTable: ColorSortDifficultyConfig[] = DEFAULT_COLOR_SORT_DIFFICULTY_TABLE;
-	private _fieldTable: ColorSortFieldTableEntry[] = DEFAULT_COLOR_SORT_FIELD_TABLE;
-	private _objectTable: ColorSortObjectTableEntry[] = DEFAULT_COLOR_SORT_OBJECT_TABLE;
+	private _fieldTable: ColorSortFieldTableEntry[] = COLOR_SORT_FIELD_TABLE;
+	private _objectTable: ColorSortObjectTableEntry[] = DEFAULT_COLOR_SORT_OBJECT_TABLE.concat(COLOR_SORT_CSV_OBJECT_TABLE);
 
 	public loadMainTable(entries: ColorSortMainTableEntry[]): void {
 		this._mainTable = entries;

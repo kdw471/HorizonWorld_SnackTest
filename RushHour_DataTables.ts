@@ -22,6 +22,10 @@ import {
 	RushHourLevel,
 	RushHourPiece,
 } from 'RushHour_Definitions';
+import { RUSHHOUR_CSV_FIELD_TABLE, RUSHHOUR_CSV_OBJECT_ROWS } from 'RushHour_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { RUSHHOUR_CSV_FIELD_TABLE };
 
 //#region Table types
 
@@ -186,6 +190,24 @@ export const DEFAULT_RUSH_HOUR_OBJECT_TABLE: RushHourObjectTableEntry[] = [
 ];
 
 /**
+ * 기획 CSV(`NPUZ_02_ObjectData.csv`) 23행을 오브젝트 테이블 행으로 변환한 것.
+ *
+ * 위의 종류별 기본 행과 달리 **실제 오브젝트 ID와 스태틱 메쉬 경로**를 들고 있다.
+ * 기본 행 뒤에 붙이므로 `getObject('BLOCK_2x1')` 같은 기존 조회는 그대로 동작하고,
+ * `getObject('4122120010')` 처럼 기획 ID 로도 찾을 수 있다.
+ */
+export const RUSH_HOUR_CSV_OBJECT_TABLE: RushHourObjectTableEntry[] = RUSHHOUR_CSV_OBJECT_ROWS.map((row) => ({
+	objectId: row.objectId,
+	size: row.size,
+	defaultOrientation: row.axis === 1
+		? EOrientation.VERTICAL
+		: (row.axis === 2 ? EOrientation.HORIZONTAL : EOrientation.FREE),
+	isGoal: row.kind === '1',
+	resource: { meshPath: row.meshPath, scale: 1 },
+	stateVisuals: makeStateVisuals(`Obj_${row.objectId}`),
+}));
+
+/**
  * 난이도 테이블 초기값.
  *
  * 난이도 3 이상에서 목표 오브젝트가 2개가 된다 (§5.1) - MULTI_GOAL_MIN_DIFFICULTY 로 계산.
@@ -254,6 +276,19 @@ export const DEFAULT_RUSH_HOUR_DIFFICULTY_TABLE: RushHourDifficultyConfig[] = [
 		minimumMovesMin: 4,
 		minimumMovesMax: 12,
 	},
+	{
+		// 기획 CSV 최고 난이도. 필드 테이블에 10판이 들어 있고, 그 실측값에 맞춰 잡았다
+		// (방해물 12~17개, 최소 이동 8~15수, 목표 2개).
+		difficulty: 6,
+		timeLimitSeconds: 270,
+		roundCount: 3,
+		goalCount: MAX_GOAL_OBJECTS,
+		blockerCountMin: 10,
+		blockerCountMax: 14,
+		blockerLengths: [1, 2, 3, 4],
+		minimumMovesMin: 5,
+		minimumMovesMax: 16,
+	},
 ];
 
 /**
@@ -280,6 +315,15 @@ export const DEFAULT_RUSH_HOUR_FIELD_TABLE: RushHourFieldTableEntry[] = [
 	},
 ];
 
+/**
+ * 실제로 쓰는 필드 테이블.
+ *
+ * 기획 CSV(`RushHour_FieldData.ts`)가 있으면 그것을 쓰고, 없으면 위의 손 배치 한 판으로 떨어진다.
+ * 난이도에 해당하는 행이 하나도 없으면 세션이 절차적 생성기로 폴백한다.
+ */
+export const RUSH_HOUR_FIELD_TABLE: RushHourFieldTableEntry[] =
+	RUSHHOUR_CSV_FIELD_TABLE.length > 0 ? RUSHHOUR_CSV_FIELD_TABLE : DEFAULT_RUSH_HOUR_FIELD_TABLE;
+
 /** PUZ 메인 테이블 초기값 */
 export const DEFAULT_PUZ_MAIN_TABLE: PuzMainTableEntry[] = DEFAULT_RUSH_HOUR_DIFFICULTY_TABLE.map((config) => ({
 	questId: `QUEST_RUSHHOUR_D${config.difficulty}`,
@@ -287,7 +331,7 @@ export const DEFAULT_PUZ_MAIN_TABLE: PuzMainTableEntry[] = DEFAULT_RUSH_HOUR_DIF
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_RUSH_HOUR_FIELD_TABLE
+	puzzleIds: RUSH_HOUR_FIELD_TABLE
 		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
@@ -303,8 +347,8 @@ export const DEFAULT_PUZ_MAIN_TABLE: PuzMainTableEntry[] = DEFAULT_RUSH_HOUR_DIF
 export class RushHourTables {
 	private _mainTable: PuzMainTableEntry[] = DEFAULT_PUZ_MAIN_TABLE;
 	private _difficultyTable: RushHourDifficultyConfig[] = DEFAULT_RUSH_HOUR_DIFFICULTY_TABLE;
-	private _fieldTable: RushHourFieldTableEntry[] = DEFAULT_RUSH_HOUR_FIELD_TABLE;
-	private _objectTable: RushHourObjectTableEntry[] = DEFAULT_RUSH_HOUR_OBJECT_TABLE;
+	private _fieldTable: RushHourFieldTableEntry[] = RUSH_HOUR_FIELD_TABLE;
+	private _objectTable: RushHourObjectTableEntry[] = DEFAULT_RUSH_HOUR_OBJECT_TABLE.concat(RUSH_HOUR_CSV_OBJECT_TABLE);
 
 	public loadMainTable(entries: PuzMainTableEntry[]): void {
 		this._mainTable = entries;

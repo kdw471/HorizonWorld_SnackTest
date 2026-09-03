@@ -312,7 +312,13 @@ export function isOnEndPointLane(piece: RushHourPiece, endPoint: RushHourEndPoin
 
 /**
  * 목표 오브젝트가 도착 포인트에 도달했는지 - 기획서 §2 (클리어 조건).
- * 플레이 공간 밖으로는 나갈 수 없으므로(§3), 해당 변에 밀착한 상태를 도달로 본다.
+ *
+ * 판정은 "목표의 앞머리 칸이 도착 포인트 칸에 맞닿았는가" 하나로 통일한다.
+ *
+ *   - 절차적 생성기가 만드는 판: 도착 포인트가 9x9 테두리 링에 있으므로
+ *     "플레이 공간의 해당 변에 밀착" 과 결과가 완전히 같다.
+ *   - 기획 CSV(NPUZ_02) 로 만든 판: 도착 포인트가 7x7 안쪽 가장자리 칸에 있고
+ *     USB 는 그 앞 칸까지 와서 꽂힌다(꽂히면 §9 대로 3칸 = USB 2칸 + 포인트 1칸).
  */
 export function hasReachedEndPoint(piece: RushHourPiece, endPoint: RushHourEndPoint): boolean {
 	if (piece.color !== endPoint.color) {
@@ -321,12 +327,48 @@ export function hasReachedEndPoint(piece: RushHourPiece, endPoint: RushHourEndPo
 	if (isOnEndPointLane(piece, endPoint) === false) {
 		return false;
 	}
+
+	// 도착 포인트는 전체 9x9 좌표, 오브젝트는 플레이 로컬 좌표라 한쪽으로 맞춘다
+	const topFull = toFullGridIndex(piece.row);
+	const leftFull = toFullGridIndex(piece.col);
 	switch (endPoint.edge) {
-		case EEdge.TOP: return piece.row === 0;
-		case EEdge.BOTTOM: return piece.row + piece.size - 1 === RUSH_HOUR_PLAY_MAX_INDEX;
-		case EEdge.LEFT: return piece.col === 0;
-		default: return piece.col + piece.size - 1 === RUSH_HOUR_PLAY_MAX_INDEX;
+		case EEdge.TOP: return topFull === endPoint.row + 1;
+		case EEdge.BOTTOM: return topFull + piece.size - 1 === endPoint.row - 1;
+		case EEdge.LEFT: return leftFull === endPoint.col + 1;
+		default: return leftFull + piece.size - 1 === endPoint.col - 1;
 	}
+}
+
+/**
+ * 목표 오브젝트가 도착 포인트에 "밀착" 하는 이동 축 좌표 (플레이 로컬).
+ *
+ * `hasReachedEndPoint()` 가 참이 되는 단 하나의 좌표를 거꾸로 푼 값이다.
+ * 축은 도착 포인트가 놓인 변이 정한다 - TOP/BOTTOM 이면 row, LEFT/RIGHT 이면 col.
+ *
+ * ## 왜 필요한가
+ *
+ * 결합(§9)은 "밀착한 자리에서 슬롯 쪽으로 반 칸 더" 인데, 예전에는 그 밀착 자리를
+ * **플레이 공간의 바깥 변**(0 또는 size-1)으로 가정했다. 절차적 생성 판은 도착 포인트가
+ * 9x9 테두리 링에 있어 그 가정이 맞지만, 기획 CSV(NPUZ_02) 판은 도착 포인트가 7x7 안쪽
+ * 가장자리 칸에 있어 USB 가 그 **앞 칸**까지밖에 못 간다. 그래서 밀착 판정이 영원히 거짓이
+ * 되고 USB 를 꽂을 수 없어 판이 클리어되지 않았다. 여기서 좌표를 직접 구해 그 가정을 없앤다.
+ */
+export function getFlushAxisValue(piece: RushHourPiece, endPoint: RushHourEndPoint): number {
+	switch (endPoint.edge) {
+		// topFull === endPoint.row + 1
+		case EEdge.TOP: return toPlayLocalIndex(endPoint.row + 1);
+		// topFull + size - 1 === endPoint.row - 1
+		case EEdge.BOTTOM: return toPlayLocalIndex(endPoint.row - piece.size);
+		// leftFull === endPoint.col + 1
+		case EEdge.LEFT: return toPlayLocalIndex(endPoint.col + 1);
+		// leftFull + size - 1 === endPoint.col - 1
+		default: return toPlayLocalIndex(endPoint.col - piece.size);
+	}
+}
+
+/** 도착 포인트가 플레이 공간(7x7) 안의 칸인지 - 기획 CSV 판이 여기에 해당한다 */
+export function isEndPointInsidePlayField(endPoint: RushHourEndPoint): boolean {
+	return isInsidePlayField(toPlayLocalIndex(endPoint.row), toPlayLocalIndex(endPoint.col));
 }
 
 /** 9x9 테두리 링에서 꼭짓점을 제외한 모든 도착 포인트 후보 좌표 - 기획서 §4 */

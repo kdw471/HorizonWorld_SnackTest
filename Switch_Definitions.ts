@@ -54,10 +54,14 @@ export const INITIAL_PRESS_SECONDS = 0.2;
 
 /**
  * 조작 연출 타이밍 - §7
- *   0.0초 중앙의 키 캡을 누름 → 0.2초 영향받는 키 캡 연출 재생 → 0.4초 모든 연출 종료
+ *   0.0초 중앙의 키 캡을 누름 → 딜레이 뒤 영향받는 키 캡 연출 재생 → 시퀀스 끝에 모든 연출 종료
+ *
+ * 기획서 §7 원안은 0.2초 / 0.4초였다. 그런데 모바일 실기에서는 플랫폼의 터치 지연이
+ * 그 위에 더해져 "누르고 반응이 없다" 로 느껴졌다. 체감 즉시 반응(~0.1초 이내)이 되도록
+ * 연출 시간을 최소로 줄였다 - 순서(누름 → 영향 영역 → 종료)는 그대로 유지된다.
  */
-export const PRESS_AREA_DELAY_SECONDS = 0.2;
-export const PRESS_SEQUENCE_SECONDS = 0.4;
+export const PRESS_AREA_DELAY_SECONDS = 0.05;
+export const PRESS_SEQUENCE_SECONDS = 0.12;
 
 //#endregion
 
@@ -302,6 +306,38 @@ export function createGridFromLayout(usable: readonly boolean[], fill: ESwitchCe
 	const grid: ESwitchCellState[] = [];
 	for (let index = 0; index < SWITCH_CELL_COUNT; index++) {
 		grid.push(usable[index] === true ? fill : ESwitchCellState.FREE);
+	}
+	return grid;
+}
+
+/**
+ * 초기 눌림 상태 문자열 5줄을 그대로 격자로 읽는다 - 기획 CSV(NPUZ_08) 전용.
+ *   '1' 눌림(녹색) / '0' 안 눌림(빨강) / '.' FREE
+ * 형식이 어긋나면 undefined 를 돌려준다.
+ */
+export function parseKeyStates(rows: readonly string[]): ESwitchCellState[] | undefined {
+	if (rows.length !== SWITCH_BOARD_SIZE) {
+		return undefined;
+	}
+	const grid: ESwitchCellState[] = [];
+	for (const row of rows) {
+		if (row.length !== SWITCH_BOARD_SIZE) {
+			return undefined;
+		}
+		for (const ch of row) {
+			if (ch === '.') {
+				grid.push(ESwitchCellState.FREE);
+			}
+			else if (ch === '1') {
+				grid.push(ESwitchCellState.PRESSED);
+			}
+			else if (ch === '0') {
+				grid.push(ESwitchCellState.UNPRESSED);
+			}
+			else {
+				return undefined;
+			}
+		}
 	}
 	return grid;
 }

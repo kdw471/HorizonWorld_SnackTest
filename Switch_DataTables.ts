@@ -13,10 +13,17 @@
  */
 
 import {
+	ESwitchCellState,
 	getMaskViolations,
 	parseKeyLayout,
+	parseKeyStates,
 	parseSwitchMask,
 } from 'Switch_Definitions';
+
+import { SWITCH_CSV_FIELD_TABLE, SWITCH_CSV_OBJECT_TABLE } from 'Switch_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { SWITCH_CSV_FIELD_TABLE };
 
 //#region Table types
 
@@ -39,7 +46,17 @@ export type SwitchFieldTableEntry = {
 	switchAreaId: string,
 	/** 키 캡 배치 (5행 × 5글자). 'O' = 키 캡, '.' = FREE (§4) */
 	layoutRows: string[],
-	/** 역셔플 누름 횟수 K - §9.4. 난이도의 1차 결정 요소 */
+	/**
+	 * 초기 눌림 상태 (5행 × 5글자). '1' 눌림 / '0' 안 눌림 / '.' FREE.
+	 *
+	 * 기획 CSV(NPUZ_08)는 배치를 직접 담고 있으므로 이 값이 있으면 **그대로 로드**한다.
+	 * 없으면 목표 상태에서 `shuffleCount` 번 역셔플해 배치를 만든다 (§9.4).
+	 */
+	initialRows?: string[],
+	/**
+	 * 역셔플 누름 횟수 K - §9.4. 난이도의 1차 결정 요소.
+	 * `initialRows` 가 있는 행에서는 **검증된 최소 누름 수**를 담는다.
+	 */
 	shuffleCount: number,
 }
 
@@ -118,12 +135,31 @@ export const DEFAULT_SWITCH_FIELD_TABLE: SwitchFieldTableEntry[] = [
 	{ index: 5, puzzleId: 'SW_D5_001', difficulty: 5, switchAreaId: 'SW_AREA_FULL', layoutRows: LAYOUT_DIAMOND, shuffleCount: 12 },
 ];
 
+/**
+ * 실제로 쓰는 필드 / 오브젝트 테이블.
+ *
+ * 기획 CSV(`Switch_FieldData.ts`)가 있으면 그것을 쓰고, 없으면 위의 손 배치 행으로 떨어진다.
+ * 도장(마스크)은 기본 6종 뒤에 기획 20종을 이어 붙인다.
+ */
+export const SWITCH_FIELD_TABLE: SwitchFieldTableEntry[] =
+	SWITCH_CSV_FIELD_TABLE.length > 0 ? SWITCH_CSV_FIELD_TABLE : DEFAULT_SWITCH_FIELD_TABLE;
+
+export const SWITCH_OBJECT_TABLE: SwitchObjectTableEntry[] =
+	DEFAULT_SWITCH_OBJECT_TABLE.concat(SWITCH_CSV_OBJECT_TABLE);
+
+/** 해당 난이도가 쓰는 필드 행의 index 목록 */
+function fieldIndexesFor(difficulty: number): number[] {
+	return SWITCH_FIELD_TABLE
+		.filter((field) => field.difficulty === difficulty)
+		.map((field) => field.index);
+}
+
 export const DEFAULT_SWITCH_DIFFICULTY_TABLE: SwitchDifficultyConfig[] = [
-	{ difficulty: 1, timeLimitSeconds: 60, roundCount: 1, fieldIndexes: [1] },
-	{ difficulty: 2, timeLimitSeconds: 90, roundCount: 2, fieldIndexes: [2] },
-	{ difficulty: 3, timeLimitSeconds: 120, roundCount: 2, fieldIndexes: [3] },
-	{ difficulty: 4, timeLimitSeconds: 150, roundCount: 3, fieldIndexes: [4] },
-	{ difficulty: 5, timeLimitSeconds: 180, roundCount: 3, fieldIndexes: [5] },
+	{ difficulty: 1, timeLimitSeconds: 60, roundCount: 1, fieldIndexes: fieldIndexesFor(1) },
+	{ difficulty: 2, timeLimitSeconds: 90, roundCount: 2, fieldIndexes: fieldIndexesFor(2) },
+	{ difficulty: 3, timeLimitSeconds: 120, roundCount: 2, fieldIndexes: fieldIndexesFor(3) },
+	{ difficulty: 4, timeLimitSeconds: 150, roundCount: 3, fieldIndexes: fieldIndexesFor(4) },
+	{ difficulty: 5, timeLimitSeconds: 180, roundCount: 3, fieldIndexes: fieldIndexesFor(5) },
 ];
 
 export const DEFAULT_SWITCH_MAIN_TABLE: SwitchMainTableEntry[] = DEFAULT_SWITCH_DIFFICULTY_TABLE.map((config) => ({
@@ -132,8 +168,8 @@ export const DEFAULT_SWITCH_MAIN_TABLE: SwitchMainTableEntry[] = DEFAULT_SWITCH_
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_SWITCH_FIELD_TABLE
-		.filter((field) => config.fieldIndexes.indexOf(field.index) >= 0)
+	puzzleIds: SWITCH_FIELD_TABLE
+		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
 
@@ -144,8 +180,8 @@ export const DEFAULT_SWITCH_MAIN_TABLE: SwitchMainTableEntry[] = DEFAULT_SWITCH_
 export class SwitchPuzzleTables {
 	private _mainTable: SwitchMainTableEntry[] = DEFAULT_SWITCH_MAIN_TABLE;
 	private _difficultyTable: SwitchDifficultyConfig[] = DEFAULT_SWITCH_DIFFICULTY_TABLE;
-	private _fieldTable: SwitchFieldTableEntry[] = DEFAULT_SWITCH_FIELD_TABLE;
-	private _objectTable: SwitchObjectTableEntry[] = DEFAULT_SWITCH_OBJECT_TABLE;
+	private _fieldTable: SwitchFieldTableEntry[] = SWITCH_FIELD_TABLE;
+	private _objectTable: SwitchObjectTableEntry[] = SWITCH_OBJECT_TABLE;
 
 	public loadMainTable(entries: SwitchMainTableEntry[]): void {
 		this._mainTable = entries;
@@ -246,6 +282,22 @@ export function validateFieldData(field: SwitchFieldTableEntry, tables: SwitchPu
 
 	if (field.shuffleCount < 1) {
 		violations.push(`Reverse-shuffle press count must be 1 or more (got ${field.shuffleCount}).`);
+	}
+
+	// 기획 CSV 행은 초기 배치를 직접 담는다. 형식과 레이아웃 일치를 확인한다
+	if (field.initialRows !== undefined) {
+		const grid = parseKeyStates(field.initialRows);
+		if (grid === undefined) {
+			violations.push(`Initial states must be 5 rows x 5 chars ('1'/'0'/'.').`);
+		}
+		else if (usable !== undefined) {
+			for (let index = 0; index < grid.length; index++) {
+				if ((grid[index] === ESwitchCellState.FREE) !== (usable[index] === false)) {
+					violations.push(`Initial states and layout disagree about FREE at cell ${index}.`);
+					break;
+				}
+			}
+		}
 	}
 
 	// §6 - 스위치 영역이 존재하고 마스크가 유효해야 한다

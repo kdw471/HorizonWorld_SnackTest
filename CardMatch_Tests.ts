@@ -14,7 +14,7 @@ import { CardMatchBoard } from 'CardMatch_Board';
 import { CardMatchEvents } from 'CardMatch_GameEvents';
 import { CardMatchLevelGenerator, describeCardMatchLevel } from 'CardMatch_LevelGenerator';
 import { CardMatchSession } from 'CardMatch_Session';
-import { CardFieldTableEntry, CardMatchTables, validateFieldData } from 'CardMatch_DataTables';
+import { CARDMATCH_CSV_FIELD_TABLE, CardFieldTableEntry, CardMatchTables, validateFieldData } from 'CardMatch_DataTables';
 import {
 	CardTile,
 	ECardMatchState,
@@ -55,6 +55,7 @@ export function runCardMatchTests(): CardMatchTestReport {
 	testBombShuffle(recorder);
 	testClearCondition(recorder);
 	testSession(recorder, tables);
+	testCsvFieldTable(recorder, tables);
 
 	let passed = 0;
 	let failed = 0;
@@ -110,7 +111,8 @@ function testDataValidation(recorder: TestRecorder, tables: CardMatchTables): vo
 		};
 		const violations = validateFieldData(badField, tables);
 		recorder.check('홀수 iObjectTile 은 데이터 오류로 거부', violations.length > 0, violations.join(' / '));
-		recorder.check('홀수 사유를 명시한다', violations.some((text) => text.indexOf('홀수') >= 0), violations.join(' / '));
+		// 검증 메시지는 콘솔로 나가므로 영어다 (한글은 Horizon 콘솔에서 깨진다)
+		recorder.check('홀수 사유를 명시한다', violations.some((text) => text.indexOf('is odd') >= 0), violations.join(' / '));
 	}
 
 	// iObjectTile 값이 (X*Y - bomb) 와 다르면 에러다
@@ -488,6 +490,38 @@ function testSession(recorder: TestRecorder, tables: CardMatchTables): void {
 				recorder.check('셔플이 끝나면 제한 시간이 다시 흐른다', session.getRemainingTimeSeconds() < timeBefore);
 			}
 		}
+	}
+}
+
+//#endregion
+
+//#region 기획 데이터 테이블 (NPUZ_06)
+
+/**
+ * `Documents/기획서 및 데이터 구조/DataTable/NPUZ_06_FieldData.csv` 에서 생성한 필드 테이블 검증.
+ *
+ * 이 퍼즐의 CSV 는 배치를 직접 담지 않고 **필드 규격**(오브젝트 그룹 / X열 / Y열 / 폭탄 수)만 담는다.
+ * 따라서 확인할 것은 "그 규격으로 실제 레벨을 만들 수 있는가" 다.
+ */
+function testCsvFieldTable(recorder: TestRecorder, tables: CardMatchTables): void {
+	const fields = CARDMATCH_CSV_FIELD_TABLE;
+	recorder.check('CSV 필드 테이블이 비어 있지 않다', fields.length > 0, `${fields.length}`);
+
+	const invalid: string[] = [];
+	for (const field of fields) {
+		const violations = validateFieldData(field, tables);
+		if (violations.length > 0) {
+			invalid.push(`${field.puzzleId}: ${violations.join(' / ')}`);
+		}
+	}
+	recorder.check('모든 CSV 필드 규격이 유효', invalid.length === 0, invalid.slice(0, 3).join(' | '));
+
+	// CSV 가 다루지 않는 난이도(2/4)는 기존 손 배치 행이 메워야 한다
+	for (const config of tables.difficultyTable) {
+		const count = tables.fieldTable.filter((field) => field.difficulty === config.difficulty).length;
+		recorder.check(`난이도 ${config.difficulty} 필드 행이 존재`, count > 0, `${count}`);
+		recorder.check(`난이도 ${config.difficulty} fieldIndexes 가 채워짐`, config.fieldIndexes.length === count,
+			`${config.fieldIndexes.length} != ${count}`);
 	}
 }
 

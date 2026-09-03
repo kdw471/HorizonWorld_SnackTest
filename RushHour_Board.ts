@@ -34,9 +34,11 @@ import {
 	getDirectionDelta,
 	getPieceCells,
 	hasReachedEndPoint,
+	isEndPointInsidePlayField,
 	isInsidePlayField,
 	isOnEndPointLane,
 	toFullGridIndex,
+	toPlayLocalIndex,
 } from 'RushHour_Definitions';
 
 /** 슬라이드 시도 결과 */
@@ -52,6 +54,8 @@ export class RushHourBoard {
 	private readonly _pieces: RushHourPiece[] = [];
 	private readonly _pieceById = new Map<string, RushHourPiece>();
 	private readonly _endPoints: RushHourEndPoint[] = [];
+	/** 어떤 오브젝트도 들어갈 수 없는 칸 ("row,col" 로컬 좌표) - 필드 안쪽 도착 포인트 */
+	private readonly _blockedCells: string[] = [];
 	/** 결합(삽입)된 목표 오브젝트 id - 모바일 사양 §9 */
 	private readonly _dockedGoalIds = new Set<string>();
 
@@ -77,6 +81,16 @@ export class RushHourBoard {
 	constructor(pieces: RushHourPiece[] = [], endPoints: RushHourEndPoint[] = [], size: number = RUSH_HOUR_PLAY_GRID_SIZE) {
 		this._size = size;
 		this._endPoints = endPoints.slice();
+
+		// 기획 CSV 판은 도착 포인트가 7x7 안쪽 가장자리 칸에 있다.
+		// 그 칸은 USB 가 꽂히는 자리이므로 어떤 오브젝트도 들어갈 수 없다.
+		// (생성기 판처럼 도착 포인트가 테두리 링에 있으면 애초에 닿지 않으므로 영향이 없다)
+		for (const endPoint of this._endPoints) {
+			if (isEndPointInsidePlayField(endPoint)) {
+				this._blockedCells.push(`${toPlayLocalIndex(endPoint.row)},${toPlayLocalIndex(endPoint.col)}`);
+			}
+		}
+
 		this.clearOccupancy();
 		for (const piece of pieces) {
 			this.addPiece(piece);
@@ -140,6 +154,9 @@ export class RushHourBoard {
 	public canOccupy(cells: RushHourCell[], ignorePieceId?: string): boolean {
 		for (const cell of cells) {
 			if (isInsidePlayField(cell.row, cell.col) === false) {
+				return false;
+			}
+			if (this._blockedCells.indexOf(`${cell.row},${cell.col}`) >= 0) {
 				return false;
 			}
 			const occupant = this._occupancy[cell.row][cell.col];

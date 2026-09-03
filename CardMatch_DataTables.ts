@@ -23,6 +23,10 @@ import {
 	ETileState,
 	cloneTile,
 } from 'CardMatch_Definitions';
+import { CARDMATCH_CSV_FIELD_TABLE, CARDMATCH_CSV_OBJECT_ROWS } from 'CardMatch_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { CARDMATCH_CSV_FIELD_TABLE };
 
 //#region Table types
 
@@ -139,22 +143,51 @@ export const DEFAULT_CARD_FIELD_TABLE: CardFieldTableEntry[] = [
 	{ index: 5, puzzleId: 'CM_D5_001', difficulty: 5, objectGroupId: 'GROUP_CH3', tileArrayX: 5, tileArrayY: 5, bombTile: 3, objectTile: 22 },
 ];
 
-export const DEFAULT_CARD_MATCH_DIFFICULTY_TABLE: CardMatchDifficultyConfig[] = [
-	{ difficulty: 1, timeLimitSeconds: 90, roundCount: 1, fieldIndexes: [1], mismatchRevealSeconds: DEFAULT_MISMATCH_REVEAL_SECONDS, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
-	{ difficulty: 2, timeLimitSeconds: 120, roundCount: 2, fieldIndexes: [2], mismatchRevealSeconds: DEFAULT_MISMATCH_REVEAL_SECONDS, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
-	{ difficulty: 3, timeLimitSeconds: 140, roundCount: 2, fieldIndexes: [3], mismatchRevealSeconds: 0.7, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
-	{ difficulty: 4, timeLimitSeconds: 180, roundCount: 3, fieldIndexes: [4], mismatchRevealSeconds: 0.7, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
-	{ difficulty: 5, timeLimitSeconds: 200, roundCount: 3, fieldIndexes: [5], mismatchRevealSeconds: 0.6, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
-];
+/**
+ * 기획 CSV(`NPUZ_06_ObjectData.csv`) 65행을 오브젝트 테이블 행으로 변환한 것.
+ * GROUP_0 은 폭탄(함정) 한 종, GROUP_1~4 는 챕터별 오브젝트 세트다.
+ */
+export const CARD_MATCH_CSV_OBJECT_TABLE: CardObjectTableEntry[] = CARDMATCH_CSV_OBJECT_ROWS.map((row) => ({
+	objectId: row.objectId,
+	type: row.groupId === 'GROUP_0' ? ECardObjectType.TRAP : ECardObjectType.NORMAL,
+	chapter: parseInt(row.groupId.substring('GROUP_'.length), 10),
+	objectGroupId: row.groupId,
+	meshPath: row.meshPath,
+	levelSize: row.levelSize,
+}));
 
+/**
+ * 실제로 쓰는 필드 테이블.
+ *
+ * 기획 CSV 는 난이도 1 / 3 / 5 만 채워져 있고 2 / 4 / 6 행은 값이 전부 0(미작성)이다.
+ * 그래서 CSV 행을 먼저 놓고, **CSV 가 다루지 않는 난이도**만 기존 손 배치 행으로 메운다.
+ */
+export const CARD_FIELD_TABLE: CardFieldTableEntry[] = CARDMATCH_CSV_FIELD_TABLE
+	.concat(DEFAULT_CARD_FIELD_TABLE.filter((field) =>
+		CARDMATCH_CSV_FIELD_TABLE.some((csv) => csv.difficulty === field.difficulty) === false));
+
+/** 해당 난이도가 쓰는 필드 행의 index 목록 */
+function fieldIndexesFor(difficulty: number): number[] {
+	return CARD_FIELD_TABLE
+		.filter((field) => field.difficulty === difficulty)
+		.map((field) => field.index);
+}
+
+export const DEFAULT_CARD_MATCH_DIFFICULTY_TABLE: CardMatchDifficultyConfig[] = [
+	{ difficulty: 1, timeLimitSeconds: 90, roundCount: 1, fieldIndexes: fieldIndexesFor(1), mismatchRevealSeconds: DEFAULT_MISMATCH_REVEAL_SECONDS, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
+	{ difficulty: 2, timeLimitSeconds: 120, roundCount: 2, fieldIndexes: fieldIndexesFor(2), mismatchRevealSeconds: DEFAULT_MISMATCH_REVEAL_SECONDS, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
+	{ difficulty: 3, timeLimitSeconds: 140, roundCount: 2, fieldIndexes: fieldIndexesFor(3), mismatchRevealSeconds: 0.7, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
+	{ difficulty: 4, timeLimitSeconds: 180, roundCount: 3, fieldIndexes: fieldIndexesFor(4), mismatchRevealSeconds: 0.7, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
+	{ difficulty: 5, timeLimitSeconds: 200, roundCount: 3, fieldIndexes: fieldIndexesFor(5), mismatchRevealSeconds: 0.6, bombShuffleSeconds: DEFAULT_BOMB_SHUFFLE_SECONDS },
+];
 export const DEFAULT_CARD_MATCH_MAIN_TABLE: CardMatchMainTableEntry[] = DEFAULT_CARD_MATCH_DIFFICULTY_TABLE.map((config) => ({
 	questId: `QUEST_CARDMATCH_D${config.difficulty}`,
 	questName: `포탈 타일 D${config.difficulty}`,
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_CARD_FIELD_TABLE
-		.filter((field) => config.fieldIndexes.indexOf(field.index) >= 0)
+	puzzleIds: CARD_FIELD_TABLE
+		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
 
@@ -165,8 +198,8 @@ export const DEFAULT_CARD_MATCH_MAIN_TABLE: CardMatchMainTableEntry[] = DEFAULT_
 export class CardMatchTables {
 	private _mainTable: CardMatchMainTableEntry[] = DEFAULT_CARD_MATCH_MAIN_TABLE;
 	private _difficultyTable: CardMatchDifficultyConfig[] = DEFAULT_CARD_MATCH_DIFFICULTY_TABLE;
-	private _fieldTable: CardFieldTableEntry[] = DEFAULT_CARD_FIELD_TABLE;
-	private _objectTable: CardObjectTableEntry[] = DEFAULT_CARD_OBJECT_TABLE;
+	private _fieldTable: CardFieldTableEntry[] = CARD_FIELD_TABLE;
+	private _objectTable: CardObjectTableEntry[] = DEFAULT_CARD_OBJECT_TABLE.concat(CARD_MATCH_CSV_OBJECT_TABLE);
 
 	public loadMainTable(entries: CardMatchMainTableEntry[]): void {
 		this._mainTable = entries;

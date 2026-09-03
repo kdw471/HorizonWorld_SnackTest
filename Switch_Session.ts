@@ -27,6 +27,8 @@ import {
 	SwitchPressResult,
 	SwitchPuzzleResultData,
 	SwitchRoundProgress,
+	createSeededRandom,
+	pickRandom,
 	toPosition,
 } from 'Switch_Definitions';
 
@@ -49,11 +51,23 @@ export class SwitchSession {
 	private _stateBeforePause: ESwitchPuzzleState = ESwitchPuzzleState.IDLE;
 
 	private _quest: SwitchMainTableEntry | undefined = undefined;
+	/**
+	 * 레벨 모드에서 이번 판의 순번 (그 난이도의 판 목록에서 0-based).
+	 * undefined 면 기존처럼 아직 안 낸 판 중에서 무작위로 고른다.
+	 */
+	private _fieldOrdinal: number | undefined = undefined;
+	/** 레벨 모드는 1라운드 고정. undefined 면 퀘스트 테이블의 roundCount 를 쓴다 */
+	private _roundCountOverride: number | undefined = undefined;
 	private _level: SwitchLevel | undefined = undefined;
 	private _board: SwitchBoard | undefined = undefined;
 	private _input: SwitchInputController | undefined = undefined;
 
 	private _roundIndex: number = 0;
+	/**
+	 * 이번 퀘스트에서 이미 낸 필드 데이터 index.
+	 * 기획 CSV 를 붙인 뒤 난이도당 판이 14~23개가 됐으므로, 라운드마다 다른 판을 낸다.
+	 */
+	private _usedFieldIndexes: number[] = [];
 	private _roundsCleared: number = 0;
 	private _remainingSeconds: number = 0;
 	private _lastPublishedSecond: number = -1;
@@ -88,7 +102,7 @@ export class SwitchSession {
 	public getRoundProgress(): SwitchRoundProgress {
 		return {
 			current: this._roundIndex + 1,
-			total: this._quest?.roundCount ?? 0,
+			total: this.getRoundCount(),
 			cleared: this._roundsCleared,
 		};
 	}
@@ -122,15 +136,63 @@ export class SwitchSession {
 			return false;
 		}
 
+		// 퀘스트 전체 플레이 - 판은 무작위로 고르고 라운드 수는 테이블을 따른다
+		this._fieldOrdinal = undefined;
+		this._roundCountOverride = undefined;
+		return this.beginQuest(quest);
+	}
+
+	/**
+	 * 레벨 하나만 플레이한다 - 메인 UI 의 Start / Continue 경로.
+	 *
+	 * 레벨 하나 = 퀘스트 라운드 하나이므로, 지정한 판을 1라운드로 연다.
+	 * `fieldOrdinal` 은 그 난이도의 판 목록에서의 순번이다 (0-based).
+	 */
+	public startLevel(difficulty: number, fieldOrdinal: number): boolean {
+		const quest = this._tables.getQuestByDifficulty(difficulty);
+		if (quest === undefined) {
+			console.warn(`[SwitchSession] No quest for difficulty ${difficulty}`);
+			return false;
+		}
+
+		this._fieldOrdinal = fieldOrdinal;
+		this._roundCountOverride = 1;
+		return this.beginQuest(quest);
+	}
+
+	/** startQuest / startLevel 의 공통 몸통 - 상태를 초기화하고 첫 라운드를 연다 */
+	private beginQuest(quest: SwitchMainTableEntry): boolean {
 		this._quest = quest;
 		this._roundIndex = 0;
+		this._usedFieldIndexes = [];
 		this._roundsCleared = 0;
 		this._remainingSeconds = quest.timeLimitSeconds > 0 ? quest.timeLimitSeconds : DEFAULT_TIME_LIMIT_SECONDS;
 		this._lastPublishedSecond = -1;
 
-		this._events.QUEST_START.publish(questId);
+		this._events.QUEST_START.publish(quest.questId);
 		this.publishRoundProgress();
 		return this.startRound();
+	}
+
+	/** 이번 플레이의 라운드 수. 레벨 모드면 1, 아니면 퀘스트 테이블 값 */
+	private getRoundCount(): number {
+		return this._roundCountOverride ?? this._quest?.roundCount ?? 0;
+	}
+
+	/**
+	 * 레벨 모드에서 이번에 쓸 판.
+	 * 레벨 모드가 아니거나 순번이 범위 밖이면 undefined 를 돌려 기존 무작위 선택으로 넘긴다.
+	 */
+	private resolveLevelField<T>(fields: T[]): T | undefined {
+		const ordinal = this._fieldOrdinal;
+		if (ordinal === undefined) {
+			return undefined;
+		}
+		const field = fields[ordinal];
+		if (field === undefined) {
+			console.warn(`[SwitchSession] Level field ordinal ${ordinal} is out of range (${fields.length} fields). Falling back to random selection.`);
+		}
+		return field;
 	}
 
 	public startQuestByDifficulty(difficulty: number): boolean {
@@ -140,6 +202,30 @@ export class SwitchSession {
 			return false;
 		}
 		return this.startQuest(quest.questId);
+	}
+
+	/**
+	 * 이번 라운드에 쓸 필드 데이터를 고른다.
+	 * 같은 퀘스트 안에서는 이미 낸 판을 다시 내지 않고, 다 소진하면 처음부터 다시 고른다.
+	 */
+	private pickFieldIndex(difficulty: number): number | undefined {
+		// 레벨 모드는 판이 정해져 있다 - 무작위 선택을 건너뛴다
+		const chosen = this.resolveLevelField(this._tables.getFieldsForDifficulty(difficulty));
+		if (chosen !== undefined) {
+			return chosen.index;
+		}
+
+		const config = this._tables.getDifficultyConfig(difficulty);
+		if (config === undefined || config.fieldIndexes.length === 0) {
+			return undefined;
+		}
+
+		const unused = config.fieldIndexes.filter((index) => this._usedFieldIndexes.indexOf(index) < 0);
+		const candidates = unused.length > 0 ? unused : config.fieldIndexes;
+		const random = this._seed === undefined ? Math.random : createSeededRandom(this._seed + this._roundIndex);
+		const picked = candidates.length === 1 ? candidates[0] : pickRandom(random, candidates);
+		this._usedFieldIndexes.push(picked);
+		return picked;
 	}
 
 	public startRound(): boolean {
@@ -152,6 +238,7 @@ export class SwitchSession {
 			puzzleId: `${quest.questId}_R${this._roundIndex}`,
 			difficulty: quest.difficulty,
 			seed: this._seed === undefined ? undefined : this._seed + this._roundIndex,
+			fieldIndex: this.pickFieldIndex(quest.difficulty),
 		});
 		if (level === undefined) {
 			console.warn(`[SwitchSession] Failed to load a level for quest ${quest.questId} round ${this._roundIndex}`);
@@ -160,15 +247,46 @@ export class SwitchSession {
 			return false;
 		}
 
-		this._level = level;
-		this._board = SwitchBoard.fromLevel(level);
-		this._input = new SwitchInputController(this._board);
-		this._lastUnpressedCount = -1;
-
 		if (this._isTimeLimitPerRound) {
 			this._remainingSeconds = quest.timeLimitSeconds > 0 ? quest.timeLimitSeconds : DEFAULT_TIME_LIMIT_SECONDS;
 			this._lastPublishedSecond = -1;
 		}
+
+		this.openLevel(level);
+		return true;
+	}
+
+	/**
+	 * 지금 판을 풀기 전 상태로 되돌린다 - 보조 레이아웃의 Reset 버튼 (worker/NextJob.md 1번).
+	 *
+	 * **남은 시간은 되돌리지 않는다.** 시간까지 함께 돌아가면 리셋 버튼이 곧 무한 연장이 된다.
+	 * 판을 새로 고르지도 않는다 - 지금 열려 있는 레벨을 그대로 다시 연다.
+	 */
+	public resetRound(): boolean {
+		const level = this._level;
+		if (level === undefined || this.canResetRound() === false) {
+			return false;
+		}
+		this.openLevel(level);
+		return true;
+	}
+
+	/** 리셋할 수 있는 상태인지 - 판이 열려 있고 아직 끝나지 않았을 때만 */
+	private canResetRound(): boolean {
+		return this._state === ESwitchPuzzleState.ROUND_INTRO || this._state === ESwitchPuzzleState.PLAYER_INPUT;
+	}
+
+	/**
+	 * 판 하나를 열어 플레이 가능 상태로 만든다.
+	 *
+	 * `startRound()` 와 `resetRound()` 가 공유한다. 둘의 차이는 **판을 새로 고르는지**와
+	 * **남은 시간을 되돌리는지** 둘뿐이고, 그 둘은 이 함수 밖에 있다.
+	 */
+	private openLevel(level: SwitchLevel): void {
+		this._level = level;
+		this._board = SwitchBoard.fromLevel(level);
+		this._input = new SwitchInputController(this._board);
+		this._lastUnpressedCount = -1;
 
 		this.setState(ESwitchPuzzleState.ROUND_INTRO);
 		this._events.LEVEL_LOADED.publish(level);
@@ -180,7 +298,6 @@ export class SwitchSession {
 		this.publishUnpressedCount();
 
 		this.setState(ESwitchPuzzleState.PLAYER_INPUT);
-		return true;
 	}
 
 	/** 매 프레임 호출. 누름 연출과 제한 시간을 함께 진행시킨다 */
@@ -356,7 +473,7 @@ export class SwitchSession {
 		this._events.ROUND_CLEAR.publish(this._roundIndex);
 		this.publishRoundProgress();
 
-		const total = this._quest?.roundCount ?? 1;
+		const total = Math.max(1, this.getRoundCount());
 		if (this._roundsCleared >= total) {
 			this.succeed();
 			return;
@@ -385,7 +502,7 @@ export class SwitchSession {
 		return {
 			result: result,
 			roundsCleared: this._roundsCleared,
-			roundCount: this._quest?.roundCount ?? 0,
+			roundCount: this.getRoundCount(),
 			remainingTimeSeconds: this.getRemainingTimeSeconds(),
 			unpressedKeyCount: this.getUnpressedKeyCount(),
 		};

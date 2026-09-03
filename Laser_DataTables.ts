@@ -23,6 +23,10 @@ import {
 	cloneGimmick,
 	clonePlacedCrystal,
 } from 'Laser_Definitions';
+import { LASER_CSV_FIELD_TABLE, LASER_CSV_OBJECT_ROWS } from 'Laser_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { LASER_CSV_FIELD_TABLE };
 
 //#region Table types
 
@@ -179,12 +183,50 @@ export const DEFAULT_LASER_OBJECT_TABLE: LaserObjectTableEntry[] = [
 	},
 ];
 
+function csvCrystalType(category: string): ECrystalType | undefined {
+	switch (category) {
+		case '05': return ECrystalType.TRIANGLE;
+		case '06': return ECrystalType.CROSS;
+		case '07': return ECrystalType.FLOWER;
+		default: return undefined;
+	}
+}
+
+function csvGimmickType(category: string, movable: boolean): EGimmickType | undefined {
+	switch (category) {
+		case '01': return EGimmickType.EMITTER;
+		case '02': return EGimmickType.RECEIVER;
+		case '03': return EGimmickType.RELAY;
+		case '04': return EGimmickType.SKULL;
+		// 필드에 박혀 있는 크리스탈은 유저가 옮길 수 없다 (§4.3)
+		default: return movable ? undefined : EGimmickType.FIXED_CRYSTAL;
+	}
+}
+
+/**
+ * 기획 CSV(`NPUZ_01_ObjectData.csv`) 40행을 오브젝트 테이블 행으로 변환한 것.
+ *
+ * 위의 종류별 기본 행과 달리 **실제 오브젝트 ID와 스태틱 메쉬 경로**를 들고 있다.
+ * 기본 행 뒤에 붙이므로 `getObjectForCrystal` / `getObjectForGimmick` 같은
+ * 종류 기준 조회는 기존처럼 기본 행을 먼저 찾고, `getObject(실제ID)` 는 이쪽을 찾는다.
+ */
+export const LASER_CSV_OBJECT_TABLE: LaserObjectTableEntry[] = LASER_CSV_OBJECT_ROWS.map((row) => ({
+	objectId: row.objectId,
+	crystalType: csvCrystalType(row.category),
+	gimmickType: csvGimmickType(row.category, row.movable),
+	description: row.description,
+	resource: { meshPath: row.meshPath, scale: 1 },
+	stateVisuals: makeStateVisuals(`Obj_${row.objectId}`),
+}));
+
 /**
  * 난이도 테이블 초기값.
  *
  * 주의: `beamCount * solutionCrystalCount + spareCrystalCount` 는
- * 인벤토리 슬롯 상한(LASER_MAX_INVENTORY_SLOTS = 5, §2)을 넘을 수 없다.
+ * 인벤토리 슬롯 상한(LASER_MAX_INVENTORY_SLOTS)을 넘을 수 없다.
  * 넘으면 생성기가 어떤 레벨도 만들지 못한다.
+ *
+ * 난이도는 기획 CSV 인덱스(80 0 01 [난이도2] [순서3])에 맞춰 1~6 을 모두 정의한다.
  */
 export const DEFAULT_LASER_DIFFICULTY_TABLE: LaserDifficultyConfig[] = [
 	{
@@ -239,6 +281,17 @@ export const DEFAULT_LASER_DIFFICULTY_TABLE: LaserDifficultyConfig[] = [
 		skullCount: 2,
 		beamCount: 2,
 	},
+	{
+		// 기획 CSV 최고 난이도. 필드 테이블에 10판이 들어 있다
+		difficulty: 6,
+		timeLimitSeconds: 270,
+		roundCount: 3,
+		solutionCrystalCount: 2,
+		spareCrystalCount: 1,
+		relayCount: 2,
+		skullCount: 2,
+		beamCount: 2,
+	},
 ];
 
 /**
@@ -264,6 +317,15 @@ export const DEFAULT_LASER_FIELD_TABLE: LaserFieldTableEntry[] = [
 	},
 ];
 
+/**
+ * 실제로 쓰는 필드 테이블.
+ *
+ * 기획 CSV(`Laser_FieldData.ts`)가 있으면 그것을 쓰고, 없으면 위의 손 배치 한 판으로 떨어진다.
+ * 난이도에 해당하는 행이 하나도 없으면 세션이 절차적 생성기로 폴백한다 (`Laser_Session.loadLevel`).
+ */
+export const LASER_FIELD_TABLE: LaserFieldTableEntry[] =
+	LASER_CSV_FIELD_TABLE.length > 0 ? LASER_CSV_FIELD_TABLE : DEFAULT_LASER_FIELD_TABLE;
+
 /** 메인 테이블 초기값 */
 export const DEFAULT_LASER_MAIN_TABLE: LaserMainTableEntry[] = DEFAULT_LASER_DIFFICULTY_TABLE.map((config) => ({
 	questId: `QUEST_LASER_D${config.difficulty}`,
@@ -271,7 +333,7 @@ export const DEFAULT_LASER_MAIN_TABLE: LaserMainTableEntry[] = DEFAULT_LASER_DIF
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_LASER_FIELD_TABLE
+	puzzleIds: LASER_FIELD_TABLE
 		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
@@ -283,8 +345,8 @@ export const DEFAULT_LASER_MAIN_TABLE: LaserMainTableEntry[] = DEFAULT_LASER_DIF
 export class LaserTables {
 	private _mainTable: LaserMainTableEntry[] = DEFAULT_LASER_MAIN_TABLE;
 	private _difficultyTable: LaserDifficultyConfig[] = DEFAULT_LASER_DIFFICULTY_TABLE;
-	private _fieldTable: LaserFieldTableEntry[] = DEFAULT_LASER_FIELD_TABLE;
-	private _objectTable: LaserObjectTableEntry[] = DEFAULT_LASER_OBJECT_TABLE;
+	private _fieldTable: LaserFieldTableEntry[] = LASER_FIELD_TABLE;
+	private _objectTable: LaserObjectTableEntry[] = DEFAULT_LASER_OBJECT_TABLE.concat(LASER_CSV_OBJECT_TABLE);
 
 	public loadMainTable(entries: LaserMainTableEntry[]): void {
 		this._mainTable = entries;

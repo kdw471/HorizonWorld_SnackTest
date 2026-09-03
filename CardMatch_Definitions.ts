@@ -15,8 +15,12 @@
 /** 한 번에 활성화할 수 있는 포탈 타일 수 - §3 "포탈 타일은 한 번에 최대 2개까지 활성화 가능" */
 export const MAX_REVEALED_TILES = 2;
 
-/** 짝이 틀렸을 때 뒤집힌 채로 보여 주는 시간(초) - 판정 연출 */
-export const DEFAULT_MISMATCH_REVEAL_SECONDS = 0.8;
+/**
+ * 짝이 틀렸을 때 뒤집힌 채로 보여 주는 시간(초) - 판정 연출.
+ * 원안은 0.8초였으나 "카드가 뒤집히는 연출이 굼뜨다" 는 피드백으로 줄였다 -
+ * 두 번째 카드를 확인할 시간은 남기되 다음 시도를 오래 막지 않는 값이다.
+ */
+export const DEFAULT_MISMATCH_REVEAL_SECONDS = 0.4;
 
 /** 폭탄 셔플 연출 시간(초). 이 동안 제한 시간이 멈추고 입력이 잠긴다 - §4 */
 export const DEFAULT_BOMB_SHUFFLE_SECONDS = 1.2;

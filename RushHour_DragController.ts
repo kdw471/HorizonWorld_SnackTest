@@ -23,6 +23,7 @@ import {
 	RushHourMove,
 	RushHourPiece,
 	getDirectionTowardsEdge,
+	getFlushAxisValue,
 	getPieceCells,
 } from 'RushHour_Definitions';
 
@@ -91,7 +92,13 @@ export type DragControllerOptions = {
 }
 
 const DEFAULT_SELECTION_RADIUS = 0.75;
-const DEFAULT_AXIS_LOCK_THRESHOLD = 0.25;
+/**
+ * 0.25 였을 때 1x1 오브젝트가 "끌었는데 따라오지 않는다" 로 느껴졌다 (감도 신고).
+ * 칸 단위 입력에서는 한 칸을 넘어가는 순간이 첫 이동량이므로, 임계값을 낮춰
+ * 축이 더 일찍 확정되게 한다. 0 으로 두지 않는 이유: 탭 수준의 지터로 축이
+ * 잘못 잠기는 것은 막아야 한다 (§7).
+ */
+const DEFAULT_AXIS_LOCK_THRESHOLD = 0.12;
 const DEFAULT_DOCK_THRESHOLD = 0.5;
 
 /** 결합 시 USB 가 슬롯 안으로 더 들어가는 칸 수 (§9 - 총 3칸 점유) */
@@ -299,6 +306,16 @@ export class RushHourDragController {
 		let move: RushHourMove | undefined = undefined;
 		if (didDock === false && this._board.isDocked(pieceId) === false) {
 			move = this.snapPieceToAxisValue(pieceId, axis, Math.round(value));
+
+			// **도착 포인트에 닿기만 해도 꽂힌다.**
+			// 슬롯 쪽으로 반 칸 더 미는 조작(§9)은 판 밖의 테두리 칸을 짚어야 해서
+			// 눈에 보이지 않고, "USB 를 삽입구에 붙였는데 클리어가 안 된다" 는 신고로 이어졌다.
+			// 그래서 밀착까지 끌어온 것만으로 결합을 확정한다. 반 칸 더 미는 조작도 그대로 동작한다.
+			//
+			// 방금 뽑은(didUndock) 드래그는 제외한다 - 뽑자마자 다시 꽂혀 분리가 불가능해진다.
+			if (didUndock === false && this._board.getGoalStatus(pieceId) === EGoalStatus.READY) {
+				didDock = this._board.dock(pieceId);
+			}
 		}
 
 		const piece = this._board.getPiece(pieceId);
@@ -378,32 +395,29 @@ export class RushHourDragController {
 		}
 
 		const isNegative = towardsSlot === EMoveDirection.UP || towardsSlot === EMoveDirection.LEFT;
-		const flush = isNegative ? this._minValue : this._maxValue;
+
+		// 밀착 좌표는 **도착 포인트에서 거꾸로 푼다.** 플레이 공간의 바깥 변으로 가정하면
+		// 도착 포인트가 7x7 안쪽에 있는 기획 CSV 판에서 영원히 어긋난다 (getFlushAxisValue 주석).
+		const flush = getFlushAxisValue(piece, endPoint);
 
 		// 이번 드래그로 밀착 위치까지 갈 수 있어야 결합 후보가 된다.
+		// 꽂힌 USB 는 보드 좌표가 곧 밀착 좌표이므로 (dock 전에 밀착까지 옮긴다) 언제나 후보다.
 		const status = this._board.getGoalStatus(pieceId);
-		const canReachFlush = status === EGoalStatus.DOCKED || this.isFlushPosition(piece, flush, isNegative);
+		const canReachFlush = status === EGoalStatus.DOCKED
+			|| (flush >= this._minValue && flush <= this._maxValue);
 		if (canReachFlush === false) {
 			return;
 		}
 
-		this._flushValue = status === EGoalStatus.DOCKED ? origin : flush;
-		this._dockValue = this._flushValue + (isNegative ? -DOCK_TRAVEL_IN_CELLS : DOCK_TRAVEL_IN_CELLS);
+		this._flushValue = flush;
+		this._dockValue = flush + (isNegative ? -DOCK_TRAVEL_IN_CELLS : DOCK_TRAVEL_IN_CELLS);
 
 		if (isNegative) {
-			this._minValue = this._dockValue;
+			this._minValue = Math.min(this._minValue, this._dockValue);
 		}
 		else {
-			this._maxValue = this._dockValue;
+			this._maxValue = Math.max(this._maxValue, this._dockValue);
 		}
-	}
-
-	/** 주어진 축 좌표가 도착 포인트에 밀착한 위치인지 */
-	private isFlushPosition(piece: RushHourPiece, value: number, isNegative: boolean): boolean {
-		if (isNegative) {
-			return value === 0;
-		}
-		return value + piece.size - 1 === this._board.size - 1;
 	}
 
 	/** 축 좌표를 실제 보드 이동으로 옮긴다 */

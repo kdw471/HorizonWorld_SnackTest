@@ -15,6 +15,11 @@ import {
 	getPieceMetrics,
 } from 'SlidePuzzle_Definitions';
 
+import { SLIDEPUZZLE_CSV_FIELD_TABLE, SLIDEPUZZLE_CSV_OBJECT_TABLE } from 'SlidePuzzle_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { SLIDEPUZZLE_CSV_FIELD_TABLE };
+
 //#region Table types
 
 /** NPUZ_07_ObjectData 한 행 - §11 */
@@ -85,12 +90,32 @@ export const DEFAULT_SLIDE_FIELD_TABLE: SlideFieldTableEntry[] = [
 	{ index: 5, puzzleId: 'SP_D5_001', difficulty: 5, puzzleObjectId: 'IMG_GROUP_B', divideNum: 4, shuffleNum: 200 },
 ];
 
+/**
+ * 실제로 쓰는 필드 / 오브젝트 테이블.
+ *
+ * 기획 CSV(`SlidePuzzle_FieldData.ts`)가 있으면 그것을 쓰고, 없으면 위의 손 배치 행으로 떨어진다.
+ */
+export const SLIDE_FIELD_TABLE: SlideFieldTableEntry[] =
+	SLIDEPUZZLE_CSV_FIELD_TABLE.length > 0 ? SLIDEPUZZLE_CSV_FIELD_TABLE : DEFAULT_SLIDE_FIELD_TABLE;
+
+export const SLIDE_OBJECT_TABLE: SlideObjectTableEntry[] =
+	DEFAULT_SLIDE_OBJECT_TABLE.concat(SLIDEPUZZLE_CSV_OBJECT_TABLE);
+
+/** 해당 난이도가 쓰는 필드 행의 index 목록 */
+function fieldIndexesFor(difficulty: number): number[] {
+	return SLIDE_FIELD_TABLE
+		.filter((field) => field.difficulty === difficulty)
+		.map((field) => field.index);
+}
+
 export const DEFAULT_SLIDE_DIFFICULTY_TABLE: SlideDifficultyConfig[] = [
-	{ difficulty: 1, timeLimitSeconds: 90, roundCount: 1, fieldIndexes: [1] },
-	{ difficulty: 2, timeLimitSeconds: 120, roundCount: 2, fieldIndexes: [2] },
-	{ difficulty: 3, timeLimitSeconds: 180, roundCount: 2, fieldIndexes: [3] },
-	{ difficulty: 4, timeLimitSeconds: 240, roundCount: 3, fieldIndexes: [4] },
-	{ difficulty: 5, timeLimitSeconds: 300, roundCount: 3, fieldIndexes: [5] },
+	{ difficulty: 1, timeLimitSeconds: 90, roundCount: 1, fieldIndexes: fieldIndexesFor(1) },
+	{ difficulty: 2, timeLimitSeconds: 120, roundCount: 2, fieldIndexes: fieldIndexesFor(2) },
+	{ difficulty: 3, timeLimitSeconds: 180, roundCount: 2, fieldIndexes: fieldIndexesFor(3) },
+	{ difficulty: 4, timeLimitSeconds: 240, roundCount: 3, fieldIndexes: fieldIndexesFor(4) },
+	{ difficulty: 5, timeLimitSeconds: 300, roundCount: 3, fieldIndexes: fieldIndexesFor(5) },
+	// 기획 CSV 최고 난이도. 4분할 55회 셔플 10판이 들어 있다
+	{ difficulty: 6, timeLimitSeconds: 330, roundCount: 3, fieldIndexes: fieldIndexesFor(6) },
 ];
 
 export const DEFAULT_SLIDE_MAIN_TABLE: SlideMainTableEntry[] = DEFAULT_SLIDE_DIFFICULTY_TABLE.map((config) => ({
@@ -99,8 +124,8 @@ export const DEFAULT_SLIDE_MAIN_TABLE: SlideMainTableEntry[] = DEFAULT_SLIDE_DIF
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_SLIDE_FIELD_TABLE
-		.filter((field) => config.fieldIndexes.indexOf(field.index) >= 0)
+	puzzleIds: SLIDE_FIELD_TABLE
+		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
 
@@ -111,8 +136,8 @@ export const DEFAULT_SLIDE_MAIN_TABLE: SlideMainTableEntry[] = DEFAULT_SLIDE_DIF
 export class SlidePuzzleTables {
 	private _mainTable: SlideMainTableEntry[] = DEFAULT_SLIDE_MAIN_TABLE;
 	private _difficultyTable: SlideDifficultyConfig[] = DEFAULT_SLIDE_DIFFICULTY_TABLE;
-	private _fieldTable: SlideFieldTableEntry[] = DEFAULT_SLIDE_FIELD_TABLE;
-	private _objectTable: SlideObjectTableEntry[] = DEFAULT_SLIDE_OBJECT_TABLE;
+	private _fieldTable: SlideFieldTableEntry[] = SLIDE_FIELD_TABLE;
+	private _objectTable: SlideObjectTableEntry[] = SLIDE_OBJECT_TABLE;
 
 	public loadMainTable(entries: SlideMainTableEntry[]): void {
 		this._mainTable = entries;

@@ -37,14 +37,14 @@ export type PuzzleCatalogEntry = {
 
 /** 메인 메뉴에 표시하는 8개 퍼즐의 정본 목록 */
 export const PUZZLE_CATALOG: readonly PuzzleCatalogEntry[] = [
-	{ id: EPuzzleId.LASER, orderIndex: 0, displayName: '레이저 해킹', subtitle: '크리스탈로 광선을 이어라' },
-	{ id: EPuzzleId.RUSH_HOUR, orderIndex: 1, displayName: '러시아워', subtitle: 'USB 를 단자까지 밀어 넣어라' },
-	{ id: EPuzzleId.COLOR_SORT, orderIndex: 2, displayName: '정렬', subtitle: '건전지를 색깔별로 모아라' },
-	{ id: EPuzzleId.COLOR_FILL, orderIndex: 3, displayName: '색 채우기', subtitle: '바늘이 지날 때 정확히 터치' },
-	{ id: EPuzzleId.FLOW, orderIndex: 4, displayName: '연결', subtitle: '전구를 빠짐없이 이어라' },
-	{ id: EPuzzleId.CARD_MATCH, orderIndex: 5, displayName: '카드 맞추기', subtitle: '포탈 타일의 짝을 기억하라' },
-	{ id: EPuzzleId.SLIDE_PUZZLE, orderIndex: 6, displayName: '슬라이드', subtitle: '조각을 밀어 그림을 완성하라' },
-	{ id: EPuzzleId.SWITCH, orderIndex: 7, displayName: '스위치', subtitle: '모든 키를 녹색으로 눌러라' },
+	{ id: EPuzzleId.LASER, orderIndex: 0, displayName: 'Laser Hack', subtitle: 'Route the beam with crystals' },
+	{ id: EPuzzleId.RUSH_HOUR, orderIndex: 1, displayName: 'Rush Hour', subtitle: 'Slide the USB into its port' },
+	{ id: EPuzzleId.COLOR_SORT, orderIndex: 2, displayName: 'Color Sort', subtitle: 'Group the batteries by color' },
+	{ id: EPuzzleId.COLOR_FILL, orderIndex: 3, displayName: 'Color Fill', subtitle: 'Tap exactly as the needle passes' },
+	{ id: EPuzzleId.FLOW, orderIndex: 4, displayName: 'Flow', subtitle: 'Connect every bulb' },
+	{ id: EPuzzleId.CARD_MATCH, orderIndex: 5, displayName: 'Card Match', subtitle: 'Remember the portal pairs' },
+	{ id: EPuzzleId.SLIDE_PUZZLE, orderIndex: 6, displayName: 'Slide Puzzle', subtitle: 'Slide the pieces into place' },
+	{ id: EPuzzleId.SWITCH, orderIndex: 7, displayName: 'Switch', subtitle: 'Turn every key green' },
 ];
 
 export function getCatalogEntry(id: EPuzzleId): PuzzleCatalogEntry | undefined {
@@ -57,10 +57,13 @@ export function getCatalogEntry(id: EPuzzleId): PuzzleCatalogEntry | undefined {
 
 /** 메인 UI 의 화면 상태 머신 */
 export enum EPuzzleHubScreen {
-	/** 퍼즐 선택 격자 */
+	/** 퍼즐 선택 격자 (2열 × 4행) */
 	MAIN_MENU = 'MAIN_MENU',
-	/** 선택한 퍼즐의 난이도 고르기 */
-	DIFFICULTY_SELECT = 'DIFFICULTY_SELECT',
+	/**
+	 * 고른 퍼즐 하나가 화면을 꽉 채운 상세 화면.
+	 * Start / Continue / Return 세 버튼만 세로로 놓는다.
+	 */
+	PUZZLE_DETAIL = 'PUZZLE_DETAIL',
 	/** 플레이 중 - 상단 HUD 만 표시하고 보드를 가리지 않는다 (PUZ_00 §8.5 손가락 가림 대응) */
 	IN_GAME = 'IN_GAME',
 	/** 일시정지 오버레이 */
@@ -102,6 +105,21 @@ export type PuzzleUIQuestResult = {
 	remainingTimeSeconds: number,
 }
 
+/**
+ * 레벨 하나를 가리키는 좌표.
+ *
+ * **레벨 하나 = 퀘스트 라운드 하나 = 기획 판(field) 하나** 이므로,
+ * 난이도와 "그 난이도의 판 목록에서 몇 번째인지" 두 값이면 특정된다.
+ * 난이도 오름차순으로 판을 이어 붙인 순서가 곧 레벨 번호다.
+ */
+export type PuzzleLevelRef = {
+	/** 1-based 레벨 번호. 퍼즐 안에서 통용된다 */
+	level: number,
+	difficulty: number,
+	/** 그 난이도의 판 목록에서의 순번 (0-based) */
+	fieldOrdinal: number,
+}
+
 //#endregion
 
 //#region View models (표현 계층에 넘기는 스냅샷)
@@ -112,24 +130,45 @@ export type PuzzleCatalogView = {
 	subtitle: string,
 	/** 레지스트리에 핸들이 등록되어 지금 플레이할 수 있는지 */
 	isAvailable: boolean,
+	/** 이 퍼즐의 총 레벨 수. 미등록이면 0 */
+	levelCount: number,
+	/** 마지막으로 클리어한 레벨. 없으면 0 */
+	clearedLevel: number,
 }
 
-export type PuzzleSelectionView = {
+/** 상세 화면(퍼즐 하나가 화면을 꽉 채운 상태)이 그리는 값 */
+export type PuzzleDetailView = {
 	puzzleId: EPuzzleId | undefined,
 	displayName: string,
 	subtitle: string,
-	/** 선택 가능한 난이도 목록 (오름차순) */
-	difficulties: number[],
-	selectedDifficulty: number,
+	/** 이 퍼즐의 총 레벨 수 */
+	levelCount: number,
+	/** 마지막으로 클리어한 레벨. 없으면 0 */
+	clearedLevel: number,
+	/** Continue 가 시작할 레벨 */
+	continueLevel: number,
+	/** Continue 를 누를 수 있는지 (클리어 기록이 있어야 한다) */
+	canContinue: boolean,
+	/** 마지막 레벨까지 전부 깼는지 */
+	isCompleted: boolean,
 }
 
 export type PuzzleHudView = {
 	puzzleId: EPuzzleId | undefined,
 	displayName: string,
-	difficulty: number,
+	/** 지금 플레이 중인 레벨 번호 (1-based) */
+	level: number,
+	/** 이 퍼즐의 총 레벨 수 */
+	levelCount: number,
+	/** 좌측 상단에 그대로 찍는 레벨 표시 - "LV 3 / 24" */
+	levelLabel: string,
 	remainingTimeSeconds: number,
-	/** "1:05" 형태 - formatClockLabel() 결과 */
+	/** "1:05" 형태 - formatClockLabel() 결과. 결과 화면의 통계에 쓴다 */
 	clockLabel: string,
+	/** "45" 형태 - 상단 중앙 카운트다운은 초 단위로만 표시한다 */
+	secondsLabel: string,
+	/** 남은 시간이 10초 미만인지 - 빨간 점멸과 초읽기 소리의 조건 */
+	isTimeCritical: boolean,
 	round: PuzzleUIRoundProgress,
 }
 
@@ -138,8 +177,43 @@ export type PuzzleHudView = {
 //#region Helpers
 
 /**
+ * 남은 시간이 이 값 **미만**이면 초읽기다 - 상단 중앙의 숫자가 빨갛게 점멸하고 소리가 난다
+ * (worker/NextJob.md 1번).
+ */
+export const HUD_TIME_CRITICAL_SECONDS = 10;
+
+/** 초읽기 점멸 주기 (초). 켜짐/꺼짐이 이 간격으로 번갈아 나온다 */
+export const HUD_CRITICAL_BLINK_SECONDS = 0.5;
+
+/**
+ * 초를 그대로 초 라벨로 만든다 (예: 125 → "125", 9.3 → "10").
+ *
+ * 상단 중앙 카운트다운은 **분:초가 아니라 초 단위**다. 남은 시간이 한 자리로 떨어지는
+ * 마지막 10초를 크게 읽히게 하려는 것이므로 자릿수를 맞추지 않는다.
+ *
+ * 올림을 쓰는 이유는 `formatClockLabel` 과 같다 - 0.2초 남았는데 "0" 이 뜨면
+ * 아직 만질 수 있는 시간이 이미 끝난 것처럼 보인다.
+ */
+export function formatSecondsLabel(totalSeconds: number): string {
+	return `${Math.max(0, Math.ceil(totalSeconds))}`;
+}
+
+/** 지금이 초읽기인지. 시간이 다 된 뒤(0초)는 점멸시키지 않는다 */
+export function isTimeCritical(remainingSeconds: number): boolean {
+	return remainingSeconds > 0 && remainingSeconds < HUD_TIME_CRITICAL_SECONDS;
+}
+
+/** 좌측 상단 레벨 표시. 총 레벨 수를 모르면 번호만 낸다 */
+export function formatLevelLabel(level: number, levelCount: number): string {
+	if (level <= 0) {
+		return '';
+	}
+	return levelCount > 0 ? `LV ${level} / ${levelCount}` : `LV ${level}`;
+}
+
+/**
  * 초를 "분:초" 라벨로 만든다 (예: 125 → "2:05").
- * `padStart` 는 Horizon 에디터 lib 에 없으므로 수동으로 패딩한다 (진행 문서 §6.1.1).
+ * `padStart` 는 Horizon 에디터 lib 에 없으므로 수동으로 패딩한다 (`Documents/생성 문서/가이드/타입체크와_테스트_실행.md` §2).
  */
 export function formatClockLabel(totalSeconds: number): string {
 	const clamped = Math.max(0, Math.ceil(totalSeconds));

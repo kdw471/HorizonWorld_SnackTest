@@ -38,6 +38,7 @@ import {
 	getEndPointLaneIndex,
 	getOrientationForEdge,
 	hasReachedEndPoint,
+	isEndPointInsidePlayField,
 	isOnEndPointLane,
 	pickRandom,
 	randomInt,
@@ -71,20 +72,39 @@ const EXPLORE_RESULT_LIMIT = 4000;
  *          필드의 한 줄(최대 칸수)을 가득 채울 수 없다.
  *   [필수] 모든 오브젝트는 최소 1칸 이상 움직일 수 있도록 배치되어야 한다.
  */
+export type RushHourValidateOptions = {
+	/**
+	 * §6 의 두 항목은 "레벨 생성기 필수 검증 항목" 이라 절차적 생성에만 강제한다.
+	 *   - 같은 이동 방향 오브젝트로 한 줄을 가득 채우지 않는다
+	 *   - 모든 오브젝트가 최소 1칸 이상 움직일 수 있다
+	 * 기획 CSV(NPUZ_02) 는 이 둘을 지키지 않는 판이 많으므로 false 로 끄고 검사한다.
+	 */
+	enforceGeneratorConstraints?: boolean,
+}
+
 export class RushHourPlacementValidator {
-	public validate(board: RushHourBoard): RushHourValidationResult {
+	public validate(board: RushHourBoard, options: RushHourValidateOptions = {}): RushHourValidationResult {
 		const violations: string[] = [];
+		const enforceGeneratorConstraints = options.enforceGeneratorConstraints ?? true;
 
 		this.validateEndPoints(board, violations);
 		this.validateGoals(board, violations);
 		this.validateGoalCorridor(board, violations);
-		this.validateSaturatedLines(board, violations);
-		this.validateEveryPieceCanMove(board, violations);
+		if (enforceGeneratorConstraints) {
+			this.validateSaturatedLines(board, violations);
+			this.validateEveryPieceCanMove(board, violations);
+		}
 
 		return { isValid: violations.length === 0, violations: violations };
 	}
 
-	/** §4 - 도착 포인트는 꼭짓점을 제외한 테두리에 최대 2곳 */
+	/**
+	 * §4 - 도착 포인트는 꼭짓점을 제외한 자리에 최대 2곳.
+	 *
+	 * 자리로 인정하는 곳은 두 가지다.
+	 *   - 9x9 테두리 링 (기획서 §4 원문. 절차적 생성기가 여기에 놓는다)
+	 *   - 7x7 플레이 공간 안의 칸 (기획 CSV 가 쓰는 방식. USB 가 그 칸으로 꽂혀 들어간다)
+	 */
 	private validateEndPoints(board: RushHourBoard, violations: string[]): void {
 		if (board.endPoints.length === 0) {
 			violations.push('There are no end points.');
@@ -98,8 +118,8 @@ export class RushHourPlacementValidator {
 		for (const endPoint of board.endPoints) {
 			const isOnRing = candidates.some((candidate) =>
 				candidate.edge === endPoint.edge && candidate.row === endPoint.row && candidate.col === endPoint.col);
-			if (isOnRing === false) {
-				violations.push(`End point '${endPoint.id}' is not on the border (corners excluded).`);
+			if (isOnRing === false && isEndPointInsidePlayField(endPoint) === false) {
+				violations.push(`End point '${endPoint.id}' is neither on the border ring (corners excluded) nor inside the play field.`);
 			}
 		}
 	}

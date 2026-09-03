@@ -19,6 +19,10 @@ import {
 	formatTileBitmap,
 	parseTileBitmap,
 } from 'Flow_Definitions';
+import { FLOW_CSV_FIELD_TABLE, FLOW_CSV_OBJECT_ROWS } from 'Flow_FieldData';
+
+/** 기획 CSV 에서 생성한 필드 테이블을 그대로 재수출한다 (테스트/툴에서 참조) */
+export { FLOW_CSV_FIELD_TABLE };
 
 //#region Tile masks (§3)
 
@@ -215,10 +219,39 @@ export const DEFAULT_FLOW_DIFFICULTY_TABLE: FlowDifficultyConfig[] = [
 		tileMaskNames: ['FULL', 'SPLIT', 'STAIR'],
 		colorCount: 6,
 	},
+	{
+		// 기획 CSV 최고 난이도. 필드 테이블에 20판이 들어 있다 (색 쌍 6~8개)
+		difficulty: 6,
+		timeLimitSeconds: 190,
+		roundCount: 3,
+		tileMaskNames: ['FULL', 'SPLIT', 'STAIR'],
+		colorCount: 7,
+	},
 ];
 
 /** 필드 테이블 초기값. 비어 있으면 레벨 생성기가 런타임에 만든다 (PUZ_00 §7.3) */
 export const DEFAULT_FLOW_FIELD_TABLE: FlowFieldTableEntry[] = [];
+
+/**
+ * 실제로 쓰는 필드 테이블.
+ *
+ * 기획 CSV(`Flow_FieldData.ts`)가 있으면 그것을 쓴다.
+ * 난이도에 해당하는 행이 하나도 없으면 세션이 절차적 생성기로 폴백한다.
+ */
+export const FLOW_FIELD_TABLE: FlowFieldTableEntry[] =
+	FLOW_CSV_FIELD_TABLE.length > 0 ? FLOW_CSV_FIELD_TABLE : DEFAULT_FLOW_FIELD_TABLE;
+
+/**
+ * 기획 CSV(`NPUZ_05_ObjectData.csv`) 17행을 오브젝트 테이블 행으로 변환한 것.
+ * 기본 행 뒤에 붙으므로 `getObject('MAIN_BULB')` 같은 기존 조회는 그대로 동작한다.
+ */
+export const FLOW_CSV_OBJECT_TABLE: FlowObjectTableEntry[] = FLOW_CSV_OBJECT_ROWS.map((row) => ({
+	objectId: row.objectId,
+	kind: row.category === '03' ? ENodeKind.SUB : ENodeKind.MAIN,
+	description: row.name,
+	resource: { meshPath: row.meshPath === 'FREE' ? '' : row.meshPath, scale: 1 },
+	stateVisuals: makeBulbVisuals(`Obj_${row.objectId}`),
+}));
 
 export const DEFAULT_FLOW_MAIN_TABLE: FlowMainTableEntry[] = DEFAULT_FLOW_DIFFICULTY_TABLE.map((config) => ({
 	questId: `QUEST_FLOW_D${config.difficulty}`,
@@ -226,7 +259,7 @@ export const DEFAULT_FLOW_MAIN_TABLE: FlowMainTableEntry[] = DEFAULT_FLOW_DIFFIC
 	difficulty: config.difficulty,
 	timeLimitSeconds: config.timeLimitSeconds,
 	roundCount: config.roundCount,
-	puzzleIds: DEFAULT_FLOW_FIELD_TABLE
+	puzzleIds: FLOW_FIELD_TABLE
 		.filter((field) => field.difficulty === config.difficulty)
 		.map((field) => field.puzzleId),
 }));
@@ -238,8 +271,8 @@ export const DEFAULT_FLOW_MAIN_TABLE: FlowMainTableEntry[] = DEFAULT_FLOW_DIFFIC
 export class FlowTables {
 	private _mainTable: FlowMainTableEntry[] = DEFAULT_FLOW_MAIN_TABLE;
 	private _difficultyTable: FlowDifficultyConfig[] = DEFAULT_FLOW_DIFFICULTY_TABLE;
-	private _fieldTable: FlowFieldTableEntry[] = DEFAULT_FLOW_FIELD_TABLE;
-	private _objectTable: FlowObjectTableEntry[] = DEFAULT_FLOW_OBJECT_TABLE;
+	private _fieldTable: FlowFieldTableEntry[] = FLOW_FIELD_TABLE;
+	private _objectTable: FlowObjectTableEntry[] = DEFAULT_FLOW_OBJECT_TABLE.concat(FLOW_CSV_OBJECT_TABLE);
 	private _tileMasks: { [name: string]: string[] } = FLOW_TILE_MASKS;
 
 	public loadMainTable(entries: FlowMainTableEntry[]): void {

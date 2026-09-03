@@ -21,6 +21,7 @@ import { ColorFillDifficultyConfig, ColorFillTables, validateDifficultyConfig } 
 import {
 	ColorFillLevel,
 	ColorFillValidationResult,
+	DEGREES_PER_SLOT,
 	DIAL_SLOT_COUNT,
 	DialSlot,
 	ESlotState,
@@ -50,6 +51,35 @@ export type ColorFillGenerationOptions = {
 
 const DEFAULT_MAX_ATTEMPTS = 200;
 const DEFAULT_CLEAR_TIME_MARGIN_RATIO = 0.8;
+
+/** 검증 봇 반응 시간의 상·하한 (초) */
+const MIN_VERIFICATION_REACTION_SECONDS = 0.05;
+const MAX_VERIFICATION_REACTION_SECONDS = 0.25;
+
+/**
+ * 검증 봇이 쓸 반응 시간.
+ * 가장 좁은 오염 덩어리가 바늘 아래를 지나가는 시간보다 짧게 잡아야
+ * "충분히 빠른 플레이어라면 풀 수 있는가"를 제대로 잴 수 있다.
+ */
+function getVerificationReactionSeconds(level: ColorFillLevel): number {
+	const groups = getContaminatedGroups(level.slots);
+	let smallestGroupSize = DIAL_SLOT_COUNT;
+	for (const group of groups) {
+		if (group.length < smallestGroupSize) {
+			smallestGroupSize = group.length;
+		}
+	}
+
+	const exposureSeconds = (smallestGroupSize * DEGREES_PER_SLOT) / level.needleSpeedDegPerSec;
+	const reaction = exposureSeconds * 0.8;
+	if (reaction < MIN_VERIFICATION_REACTION_SECONDS) {
+		return MIN_VERIFICATION_REACTION_SECONDS;
+	}
+	if (reaction > MAX_VERIFICATION_REACTION_SECONDS) {
+		return MAX_VERIFICATION_REACTION_SECONDS;
+	}
+	return reaction;
+}
 
 //#region Validator
 
@@ -169,9 +199,22 @@ export class ColorFillLevelGenerator {
 		return undefined;
 	}
 
-	/** 자동 플레이 봇을 돌려 클리어 가능성과 소요 시간을 잰다 - §8.6 */
+	/**
+	 * 자동 플레이 봇을 돌려 클리어 가능성과 소요 시간을 잰다 - §8.6.
+	 *
+	 * 봇의 반응 시간은 **레벨의 타이밍에 맞춰 잡는다.** 봇의 기본값(0.25초)을 그대로 쓰면
+	 * 바늘이 빠른 레벨에서 가장 좁은 덩어리의 노출 시간보다 반응이 느려져,
+	 * 실제로는 풀 수 있는 배치도 "클리어 불가"로 버려진다.
+	 * (기획 CSV 의 난이도 4는 450도/초 × 3칸 = 노출 0.13초라 0.25초 반응으로는 전부 탈락했다)
+	 *
+	 * 여기서 재는 것은 "충분히 빠른 플레이어라면 풀 수 있는 배치인가" 이고,
+	 * 사람이 실제로 낼 수 있는 반응 시간인지는 별도 밸런스 문제로 다룬다.
+	 */
 	public simulate(level: ColorFillLevel, timeLimitSeconds: number): AutoPlayResult {
-		return this._bot.play(ColorFillDial.fromLevel(level), { timeLimitSeconds: timeLimitSeconds });
+		return this._bot.play(ColorFillDial.fromLevel(level), {
+			timeLimitSeconds: timeLimitSeconds,
+			reactionSeconds: getVerificationReactionSeconds(level),
+		});
 	}
 
 	public verify(level: ColorFillLevel, config?: ColorFillDifficultyConfig): ColorFillValidationResult {
