@@ -244,6 +244,16 @@ export class ColorSortCoreAPI extends Component<typeof ColorSortCoreAPI> {
 			+ 'Elements without one are drawn with a flat colour.');
 	}
 
+	/**
+	 * 지금 판이 실제로 쓰는 케이스 수 (= 격자의 열 수).
+	 *
+	 * 테이블은 케이스를 언제나 `TOTAL_CASE_COUNT` 개 만들고 **앞에서부터** 활성으로
+	 * 표시한다(`createCases`). 예전에는 격자를 8열로 고정해 두고 남는 열을 숨겼는데,
+	 * 숨긴 열이 오른쪽에 몰려 **판이 왼쪽으로 치우쳐 보였다** (worker/NextJob.md 1번).
+	 * 이제 격자를 활성 케이스 수만큼만 만든다 - 격자 자체가 가운데 정렬이므로 판도 가운데 온다.
+	 */
+	private _caseCount: number = TOTAL_CASE_COUNT;
+
 	private createPresenter(): void {
 		this._presenter = new PuzzleBoardPresenter(
 			{
@@ -254,14 +264,54 @@ export class ColorSortCoreAPI extends Component<typeof ColorSortCoreAPI> {
 			},
 			{
 				// 열 번호가 곧 케이스 index 다. 세로 어디를 잡아도 최상단부터 집는다 (§6).
-				onCellDown: (cell) => { this.onDragBegin(toCaseIndex(cell)); },
-				onCellMove: (cell) => { this.onDragMove(toCaseIndexOrUndefined(cell)); },
+				onCellDown: (cell) => { this.onDragBegin(this.toCaseIndex(cell)); },
+				onCellMove: (cell) => { this.onDragMove(this.toCaseIndexOrUndefined(cell)); },
 				// 격자 밖에서 떼면 undefined -> §8 영역 밖 드랍(리스폰 대기)
-				onCellUp: (cell) => { this.onDragEnd(toCaseIndexOrUndefined(cell)); },
+				onCellUp: (cell) => { this.onDragEnd(this.toCaseIndexOrUndefined(cell)); },
 				// 보조 레이아웃의 Reset 버튼 - 판만 되돌리고 남은 시간은 그대로 둔다
 				onReset: () => { this.resetLevel(); },
 			},
 		);
+	}
+
+	/**
+	 * 격자의 열 수를 **활성 케이스 수**에 맞춘다.
+	 *
+	 * 이것이 판을 가로 가운데로 오게 하는 전부다. 격자는 보드 영역 안에서 가운데 정렬되므로,
+	 * 쓰지 않는 열을 아예 만들지 않으면 남는 자리가 좌우로 똑같이 나뉜다.
+	 */
+	private resizeGridToActiveCases(): void {
+		const board = this.session.board;
+		if (board === undefined) {
+			return;
+		}
+		let activeCount = 0;
+		for (let index = 0; index < TOTAL_CASE_COUNT; index++) {
+			if (board.getCase(index)?.isActive === true) {
+				activeCount++;
+			}
+		}
+		// 활성 케이스가 하나도 잡히지 않으면(있을 수 없지만) 예전처럼 전부 그린다
+		const nextCount = activeCount > 0 ? activeCount : TOTAL_CASE_COUNT;
+		if (nextCount === this._caseCount) {
+			return;
+		}
+		this._caseCount = nextCount;
+		this._presenter.resetLayout({
+			title: getCatalogEntry(EPuzzleId.COLOR_SORT)?.displayName ?? '',
+			rowCount: CASE_CAPACITY,
+			colCount: nextCount,
+			boardTexture: TEXTURE_BOARD,
+		});
+	}
+
+	/** 칸 번호 -> 케이스 index. 열 번호가 곧 케이스다 */
+	private toCaseIndex(cell: number): number {
+		return cell % this._caseCount;
+	}
+
+	private toCaseIndexOrUndefined(cell: number): number | undefined {
+		return cell === PUZZLE_BOARD_CELL_OUTSIDE ? undefined : this.toCaseIndex(cell);
 	}
 
 	//#endregion
@@ -467,6 +517,7 @@ export class ColorSortCoreAPI extends Component<typeof ColorSortCoreAPI> {
 
 	private onLevelLoaded(level: ColorSortLevel): void {
 		this.clearDragState();
+		this.resizeGridToActiveCases();
 		this.applyGridVisuals();
 
 		PuzzleBoardStage.instance.mount(this._presenter);
@@ -492,7 +543,7 @@ export class ColorSortCoreAPI extends Component<typeof ColorSortCoreAPI> {
 	}
 
 	private applyGridVisuals(): void {
-		for (let caseIndex = 0; caseIndex < TOTAL_CASE_COUNT; caseIndex++) {
+		for (let caseIndex = 0; caseIndex < this._caseCount; caseIndex++) {
 			this.applyCaseVisual(caseIndex);
 		}
 	}
@@ -531,7 +582,7 @@ export class ColorSortCoreAPI extends Component<typeof ColorSortCoreAPI> {
 		const floatBase = Math.max(0, Math.min(floatFrom, CASE_CAPACITY - this._dragBatteries.length));
 
 		for (let row = 0; row < CASE_CAPACITY; row++) {
-			const cell = row * TOTAL_CASE_COUNT + caseIndex;
+			const cell = row * this._caseCount + caseIndex;
 
 			// §3 - 시작부터 사용할 수 없는 케이스는 아예 그리지 않는다. 그러면 눌리지도 않는다.
 			if (batteryCase === undefined || batteryCase.isActive === false) {
@@ -613,15 +664,6 @@ export class ColorSortCoreAPI extends Component<typeof ColorSortCoreAPI> {
 	//#endregion
 }
 
-/** 칸 번호 -> 케이스 index. 열 번호가 곧 케이스다 */
-function toCaseIndex(cell: number): number {
-	return cell % TOTAL_CASE_COUNT;
-}
-
-/** 격자 밖(PUZZLE_BOARD_CELL_OUTSIDE)이면 undefined - §8 영역 밖 드랍으로 다뤄진다 */
-function toCaseIndexOrUndefined(cell: number): number | undefined {
-	return cell === PUZZLE_BOARD_CELL_OUTSIDE ? undefined : toCaseIndex(cell);
-}
 
 /** 색 이름 -> 표시 색. 표에 없는 색이 오면 회색으로 떨어뜨린다 */
 function getBatteryColor(color: EBatteryColor): PuzzleBoardColor {

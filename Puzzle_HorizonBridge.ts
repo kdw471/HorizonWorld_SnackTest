@@ -20,9 +20,11 @@
  *   보드 중심 엔티티의 forward 가 평면의 법선이다.
  */
 
-import { Component, Entity, FocusedInteractionOptions, InteractionInfo, Quaternion, Vec3, World } from 'horizon/core';
+import { Component, Entity, FocusedInteractionOptions, InteractionInfo, PlayerControls, Quaternion, Vec3, World } from 'horizon/core';
 import LocalCamera, { CameraTransitionOptions, Easing, FixedCameraOptions } from 'horizon/camera';
 import { onTouchEnd, onTouchMove, onTouchStart } from 'Basics_Input_Screen';
+import { screenPointToGridPoint } from 'PuzzleUI_RelativeLayout';
+import { PuzzleBoardStage } from 'PuzzleBoardUI_Presenter';
 import { SubscriptionBag } from 'Utility_Events';
 
 //#region Types
@@ -257,6 +259,159 @@ export class PuzzleTouchRouter {
 	}
 
 	//#endregion
+}
+
+//#endregion
+
+//#region Screen drag stream (제안 1 - 연속 좌표 드래그)
+
+/**
+ * `InteractionInfo.screenPosition` 의 세로축 방향.
+ *
+ * 문서에는 0~1 정규화라는 것만 있고 방향이 없어 기기 실험으로 확정했다
+ * (2026-09-04, 드래그 스트림 프로브): **아래가 0 이다.** 변환
+ * (`screenPointToGridPoint`)은 위가 0 을 가정하므로 여기서 `1 - y` 로 뒤집는다.
+ * 플랫폼이 방향을 바꾸면(터치가 상하 반전으로 나타나면) 이 값만 되돌린다.
+ */
+const SCREEN_POSITION_Y_IS_TOP_DOWN = false;
+
+export type PuzzleDragStreamHandlers = {
+	/** 스트림이 이 드래그를 넘겨받은 뒤의 이동 - 연속 전체 그리드 좌표 (정수 = 칸 중심) */
+	onStreamMove: (point: PuzzleGridPoint) => void,
+	/** 스트림이 넘겨받은 드래그의 뗌 - 마지막 좌표와 함께 확정한다 */
+	onStreamEnd: (point: PuzzleGridPoint) => void,
+}
+
+/**
+ * Focused Interaction 입력 스트림을 **연속 격자 좌표** 드래그로 바꾼다
+ * (드래그 반응속도 개선 제안 §3 제안 1).
+ *
+ * ## 하이브리드 입력 - 잡기는 Pressable, 이동·뗌은 스트림
+ *
+ * 잡기는 지금처럼 칸 `Pressable` 의 down 이 맡는다 (어느 오브젝트인지는 칸이 이미 안다).
+ * CoreAPI 가 잡기에 성공하면 `notifyDragBegan()` 으로 이 라우터를 무장시키고, 그 뒤
+ * `PlayerControls.onFocusedInteractionInputMoved/Ended` 가 오면 화면 좌표를
+ * `screenPointToGridPoint()` 로 바꿔 콜백한다. 칸 경계를 기다리지 않으므로
+ * 입력 이벤트 해상도로 연속 추종이 된다.
+ *
+ * ## 폴백 규칙 - **스트림이 실제로 움직임을 배달한 드래그만 넘겨받는다**
+ *
+ * Screen Overlay 가 터치를 소비해 스트림이 오지 않는 환경에서도 조작이 죽으면 안 된다.
+ * 그래서 첫 moved 가 변환에 성공한 순간부터만 `isDriving` 이 되고, CoreAPI 는 그때부터
+ * 칸 단위 move/up 콜백을 무시한다. 스트림이 한 번도 오지 않으면 `isDriving` 은 끝까지
+ * false 라 기존 칸 단위 경로가 그대로 동작한다 - 두 경로가 같은 컨트롤러 API 를 쓰므로
+ * 공존할 수 있다는 제안서의 전제 그대로다.
+ *
+ * ## 전제 조건 둘
+ *
+ * 1. **Focused Interaction 모드** - 스트림 자체가 이 모드에서만 흐른다. CoreAPI 가
+ *    퍼즐 시작에서 `enterPuzzleInteraction()`(카메라 포함) 또는
+ *    `enterPuzzleTouchStream()`(모드만)으로 들어간다.
+ * 2. **패널 지오메트리** - 화면 -> 격자 변환은 패널이 `PuzzleBoardStage` 에 실어 둔
+ *    확정 배치를 쓴다. 없으면 변환을 포기하고 폴백만 동작한다.
+ */
+export class PuzzleScreenDragStream {
+	private readonly _rowCount: number;
+	private readonly _colCount: number;
+	private readonly _handlers: PuzzleDragStreamHandlers;
+
+	/** CoreAPI 가 잡기에 성공해 스트림을 기다리는 중인지 */
+	private _isArmed: boolean = false;
+	/** 이번 드래그를 스트림이 넘겨받았는지 - 첫 moved 변환 성공부터 뗌까지 */
+	private _isDriving: boolean = false;
+	/** 마지막으로 변환에 성공한 좌표 - ended 의 좌표를 만들 수 없을 때의 대체값 */
+	private _lastPoint: PuzzleGridPoint | undefined = undefined;
+
+	constructor(component: Component, rowCount: number, colCount: number, handlers: PuzzleDragStreamHandlers) {
+		this._rowCount = rowCount;
+		this._colCount = colCount;
+		this._handlers = handlers;
+
+		component.connectLocalBroadcastEvent(PlayerControls.onFocusedInteractionInputMoved,
+			(data: { interactionInfo: InteractionInfo[] }) => this.handleMoved(data.interactionInfo[0]));
+		component.connectLocalBroadcastEvent(PlayerControls.onFocusedInteractionInputEnded,
+			(data: { interactionInfo: InteractionInfo[] }) => this.handleEnded(data.interactionInfo[0]));
+	}
+
+	/** CoreAPI 의 잡기(onCellDown/onItemDown)가 성공했다 - 이 드래그의 스트림을 받기 시작한다 */
+	public notifyDragBegan(): void {
+		this._isArmed = true;
+		this._isDriving = false;
+		this._lastPoint = undefined;
+	}
+
+	/**
+	 * 이번 드래그를 스트림이 넘겨받았는지. true 인 동안 CoreAPI 는 칸 단위
+	 * move/up 콜백을 무시해야 한다 - 두 경로가 같은 좌표를 두 번 넣지 않게.
+	 */
+	public get isDriving(): boolean {
+		return this._isDriving;
+	}
+
+	//#region Internal
+
+	private handleMoved(info: InteractionInfo | undefined): void {
+		if (this._isArmed === false || info === undefined) {
+			return;
+		}
+		const point = this.toGrid(info);
+		if (point === undefined) {
+			return;
+		}
+		this._isDriving = true;
+		this._lastPoint = point;
+		this._handlers.onStreamMove(point);
+	}
+
+	private handleEnded(info: InteractionInfo | undefined): void {
+		if (this._isArmed === false) {
+			return;
+		}
+		const wasDriving = this._isDriving;
+		// 어느 경로로 끝나든 이 터치의 무장은 여기서 푼다 - 다음 잡기가 다시 무장한다
+		this._isArmed = false;
+		this._isDriving = false;
+		if (wasDriving === false) {
+			// 스트림이 한 번도 배달하지 않은 드래그다 - 칸 단위 폴백이 마감한다
+			return;
+		}
+		const point = (info === undefined ? undefined : this.toGrid(info)) ?? this._lastPoint;
+		this._lastPoint = undefined;
+		if (point === undefined) {
+			// 좌표를 전혀 만들 수 없다 - moved 가 이미 마지막 자리를 반영했으므로 그대로 확정한다
+			this._handlers.onStreamEnd({ row: Number.NaN, col: Number.NaN });
+			return;
+		}
+		this._handlers.onStreamEnd(point);
+	}
+
+	/** 정규화 화면 좌표 -> 연속 전체 그리드 좌표. 패널 지오메트리가 없으면 undefined */
+	private toGrid(info: InteractionInfo): PuzzleGridPoint | undefined {
+		const geometry = PuzzleBoardStage.instance.screenGeometry;
+		if (geometry === undefined) {
+			return undefined;
+		}
+		const y = SCREEN_POSITION_Y_IS_TOP_DOWN ? info.screenPosition.y : 1 - info.screenPosition.y;
+		return screenPointToGridPoint(geometry, this._rowCount, this._colCount, info.screenPosition.x, y);
+	}
+
+	//#endregion
+}
+
+/**
+ * Focused Interaction 모드에만 들어간다 - **카메라는 건드리지 않는다.**
+ *
+ * 드래그 스트림(제안 1)은 이 모드에서만 흐르는데, `enterPuzzleInteraction()` 은 고정
+ * 카메라까지 세트로 적용한다. 카메라 고정을 원하지 않는 월드(`focusCamera` 꺼짐)에서
+ * 스트림만 켜기 위한 가벼운 진입이다. 이동/점프 버튼이 숨는 것은 모드 자체의 효과다.
+ */
+export function enterPuzzleTouchStream(component: Component): void {
+	component.entity.owner.get().enterFocusedInteractionMode({ disableFocusExitButton: true });
+}
+
+/** `enterPuzzleTouchStream()` 의 해제 - 모드만 나가고 카메라는 손대지 않는다 */
+export function exitPuzzleTouchStream(component: Component): void {
+	component.entity.owner.get().exitFocusedInteractionMode();
 }
 
 //#endregion

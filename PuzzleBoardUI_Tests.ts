@@ -51,6 +51,7 @@ import {
 	validateBoardLayout,
 } from 'PuzzleBoardUI_Definitions';
 import { PuzzleBoardPressHighlight, PuzzleBoardPresenter, PuzzleBoardStage } from 'PuzzleBoardUI_Presenter';
+import { PuzzleScreenGridGeometry, resolveRelativeLayout, screenPointToGridPoint } from 'PuzzleUI_RelativeLayout';
 
 export type PuzzleBoardUITestResult = {
 	name: string,
@@ -530,6 +531,51 @@ function testIntroBanner(recorder: TestRecorder): void {
 	stage.mount(presenter);
 	stage.unmount(presenter);
 	recorder.check('배너 - 보드를 내리면 배너도 내려간다', presenter.isIntroVisible === false);
+
+	// 배너가 완전히 사라지기 전까지는 보드 조작이 막힌다 - 입력 스위치가 켜져 있어도.
+	// (CoreAPI 는 레벨 로드에서 setInputEnabled(true) 를 배너보다 먼저 부른다)
+	const log: InputLog = [];
+	const gated = new PuzzleBoardPresenter(SWITCH_LAYOUT, {
+		onCellDown: (cell) => log.push(`down:${cell}`),
+		onCellUp: (cell) => log.push(`up:${cell}`),
+		onReset: () => log.push('reset'),
+	});
+	gated.setAllCells({ isVisible: true });
+	gated.setInputEnabled(true);
+	gated.beginIntro();
+	gated.pointerDown(0);
+	recorder.check('배너 - 떠 있는 동안 칸 누름이 막힌다',
+		log.length === 0 && gated.hasActivePress === false, log.join(','));
+	recorder.check('배너 - 떠 있는 동안 리셋도 막힌다',
+		gated.requestReset() === false && log.length === 0, log.join(','));
+	gated.endIntro();
+	gated.pointerDown(0);
+	recorder.check('배너 - 내려간 뒤에는 입력이 열린다', log.join(',') === 'down:0', log.join(','));
+	gated.pointerUp();
+
+	// 드래그 중에 새 배너가 뜨면(다음 레벨) 열려 있던 누름을 마감한다 - 안 하면 영영 안 놓인다
+	log.length = 0;
+	gated.pointerDown(1);
+	gated.beginIntro();
+	recorder.check('배너 - 뜨는 순간 진행 중이던 누름이 마감된다',
+		gated.hasActivePress === false && log.join(',') === `down:1,up:${PUZZLE_BOARD_CELL_OUTSIDE}`, log.join(','));
+
+	// 페이드가 시작되면 배너가 아직 떠 있어도 입력이 먼저 열린다 - 다 잦아들기를
+	// 기다리게 하면 그 시간만큼 레벨 시작 후 첫 터치가 삼켜진다 (반응성).
+	log.length = 0;
+	gated.unlockIntroInput();
+	gated.pointerDown(2);
+	recorder.check('배너 - 페이드 시작(조기 해제) 뒤에는 배너가 떠 있어도 입력이 열린다',
+		gated.isIntroVisible === true && log.join(',') === 'down:2', log.join(','));
+	gated.pointerUp();
+	gated.endIntro();
+
+	// 다음 레벨의 배너가 다시 뜨면 잠금도 다시 걸린다 - 조기 해제가 눌러앉으면 안 된다
+	log.length = 0;
+	gated.beginIntro();
+	gated.pointerDown(3);
+	recorder.check('배너 - 새 배너가 뜨면 입력이 다시 잠긴다', log.length === 0, log.join(','));
+	gated.endIntro();
 }
 
 function testStage(recorder: TestRecorder): void {
@@ -763,6 +809,71 @@ function testPressHighlight(recorder: TestRecorder): void {
 		paused.getPressHighlight().cell === PUZZLE_BOARD_CELL_OUTSIDE);
 }
 
+/**
+ * 화면 -> 격자 변환 (드래그 반응속도 개선 제안 §3 제안 1).
+ *
+ * 기대값은 함수를 다시 부르지 않고 **손으로 계산한 리터럴**이다 - 같은 수식을 두 번 돌려
+ * 맞다고 하는 동어반복을 피한다. 기본 배치(top 6 / bottom 8 / 7:3 / 판 96%x94%),
+ * 세로 화면 aspect 0.46 (1179x2556 폰의 읽기값 590/1280) 기준:
+ *
+ *   본 격자 영역   세로 (1-0.06-0.08)*0.7 = 0.602, 위 0.06
+ *   판 한 변      min(0.96, 0.602*0.94/0.46=1.230...) = 0.96 (가로 기준)
+ *                = 0.96*0.46 = 0.4416 (세로 기준)
+ *   판 위치      left (1-0.96)/2 = 0.02, top 0.06+(0.602-0.4416)/2 = 0.1402
+ *   9x9 칸      가로 0.96/9 = 0.10666..., 세로 0.4416/9 = 0.04906...
+ */
+function testScreenToGrid(recorder: TestRecorder): void {
+	const geometry: PuzzleScreenGridGeometry = {
+		layout: resolveRelativeLayout(),
+		screenAspect: 0.46,
+	};
+	const approx = (value: number | undefined, expected: number): boolean =>
+		value !== undefined && Math.abs(value - expected) < 1e-9;
+
+	// 첫 칸(0,0)의 중심 = 판 원점 + 칸 반 칸
+	const firstCentreX = 0.02 + 0.96 / 9 / 2;
+	const firstCentreY = 0.1402 + 0.4416 / 9 / 2;
+	const first = screenPointToGridPoint(geometry, 9, 9, firstCentreX, firstCentreY);
+	recorder.check('화면->격자 - 첫 칸 중심이 (0, 0)',
+		approx(first?.row, 0) && approx(first?.col, 0), `${first?.row}, ${first?.col}`);
+
+	// 판의 정중앙 = 가운데 칸 (4, 4) 의 중심
+	const centre = screenPointToGridPoint(geometry, 9, 9, 0.02 + 0.48, 0.1402 + 0.2208);
+	recorder.check('화면->격자 - 판 정중앙이 (4, 4)',
+		approx(centre?.row, 4) && approx(centre?.col, 4), `${centre?.row}, ${centre?.col}`);
+
+	// 가로로 한 칸 이동하면 col 이 정확히 1 오른다 (연속 좌표의 자)
+	const shifted = screenPointToGridPoint(geometry, 9, 9, firstCentreX + 0.96 / 9, firstCentreY);
+	recorder.check('화면->격자 - 가로 한 칸 = col +1',
+		approx(shifted?.col, 1) && approx(shifted?.row, 0), `${shifted?.row}, ${shifted?.col}`);
+
+	// 정사각형이 아닌 판 (4행 8열) - 격자 상자가 판 안에서 중앙 정렬이므로
+	// 판 정중앙이 곧 격자 중앙 ((4-1)/2, (8-1)/2) 이다
+	const wide = screenPointToGridPoint(geometry, 4, 8, 0.02 + 0.48, 0.1402 + 0.2208);
+	recorder.check('화면->격자 - 4행 8열 판의 정중앙이 (1.5, 3.5)',
+		approx(wide?.row, 1.5) && approx(wide?.col, 3.5), `${wide?.row}, ${wide?.col}`);
+
+	// 판 왼쪽 여백을 짚으면 col 이 0 미만으로 나온다 - 잘라내지 않는다 (§8.4)
+	const outside = screenPointToGridPoint(geometry, 9, 9, 0, firstCentreY);
+	recorder.check('화면->격자 - 판 밖 좌표는 잘라내지 않고 범위 밖 값으로 나온다',
+		outside !== undefined && outside.col < 0, `${outside?.col}`);
+
+	// 가로 화면 (aspect 16:9) - 세로 예산이 판 크기를 정한다.
+	// 판 한 변 = 0.602*0.94/(16/9) = 0.31818... (가로 기준). 그 중심은 여전히 화면 중앙 x=0.5.
+	const landscape: PuzzleScreenGridGeometry = { layout: resolveRelativeLayout(), screenAspect: 16 / 9 };
+	const landscapeCentre = screenPointToGridPoint(landscape, 9, 9,
+		0.5, 0.06 + 0.602 / 2);
+	recorder.check('화면->격자 - 가로 화면에서도 판 중앙이 (4, 4)',
+		approx(landscapeCentre?.row, 4) && approx(landscapeCentre?.col, 4),
+		`${landscapeCentre?.row}, ${landscapeCentre?.col}`);
+
+	// 좌표를 만들 수 없는 입력
+	recorder.check('화면->격자 - NaN 좌표는 undefined',
+		screenPointToGridPoint(geometry, 9, 9, Number.NaN, 0.5) === undefined);
+	recorder.check('화면->격자 - 0행 판은 undefined',
+		screenPointToGridPoint(geometry, 0, 0, 0.5, 0.5) === undefined);
+}
+
 export function runPuzzleBoardUITests(): PuzzleBoardUITestReport {
 	const recorder = new TestRecorder();
 
@@ -775,6 +886,7 @@ export function runPuzzleBoardUITests(): PuzzleBoardUITestReport {
 	testStage(recorder);
 	testPressHighlight(recorder);
 	testSwitchIntegration(recorder);
+	testScreenToGrid(recorder);
 
 	let passed = 0;
 	let failed = 0;

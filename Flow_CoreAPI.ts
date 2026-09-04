@@ -46,6 +46,9 @@ import { FlowSession } from 'Flow_Session';
 import {
 	EFlowColor,
 	ENodeKind,
+	ENodeRole,
+	assignFlowPairLabels,
+	getFlowNodeLabel,
 	FLOW_GRID_SIZE,
 	FlowLevel,
 	FlowResultData,
@@ -72,12 +75,18 @@ const COLOR_UNLIT_SUB: PuzzleBoardColor = boardColor(0.35, 0.36, 0.42);
 /** 경로가 지나간 서브 오브젝트를 메인보다 어둡게 만드는 비율 - 출발/도착 지점이 눈에 띄게 한다 */
 const SUB_TONE_SCALE = 0.7;
 
+/** 밝은 전구 위에 얹는 글자색 - 노랑·연두 위에서도 읽히도록 어둡게 둔다 */
+const COLOR_NODE_LABEL: PuzzleBoardColor = boardColor(0.08, 0.08, 0.1);
+
 /**
  * 이 퍼즐의 텍스처 키. 에디터 prop 과 1:1 로 대응한다.
  * 에셋을 끼우지 않은 키는 라이브러리에 등록되지 않으므로 색으로 그려진다.
  */
 /** 전구(경로의 양 끝) */
 const TEXTURE_NODE: PuzzleTextureKey = textureKey('flow', 'node');
+/** 출발 / 도착 전구를 그림으로도 가른다 - 없으면 위의 공통 전구 그림으로 떨어진다 */
+const TEXTURE_NODE_START: PuzzleTextureKey = textureKey('flow', 'nodeStart');
+const TEXTURE_NODE_END: PuzzleTextureKey = textureKey('flow', 'nodeEnd');
 /** 이어 그린 선이 지나는 칸 */
 const TEXTURE_PATH: PuzzleTextureKey = textureKey('flow', 'path');
 /** 아무것도 없는 칸 */
@@ -105,8 +114,12 @@ export class FlowCoreAPI extends Component<typeof FlowCoreAPI> {
 		cameraFov: { type: PropTypes.Number, default: 40 },
 
 		// --- 텍스처 (전부 선택) - 비워 두면 그 요소는 색으로 그려진다 ---
-		/** 전구(경로의 양 끝) */
+		/** 전구(경로의 양 끝) - 아래 출발/도착 그림이 없을 때의 기본 */
 		nodeTexture: { type: PropTypes.Asset },
+		/** 출발 전구 */
+		nodeStartTexture: { type: PropTypes.Asset },
+		/** 도착 전구 */
+		nodeEndTexture: { type: PropTypes.Asset },
 		/** 이어 그린 선이 지나는 칸 */
 		pathTexture: { type: PropTypes.Asset },
 		/** 아무것도 없는 칸 */
@@ -207,6 +220,8 @@ export class FlowCoreAPI extends Component<typeof FlowCoreAPI> {
 	private registerTextures(): void {
 		const count = PuzzleTextureLibrary.instance.registerAll([
 			{ key: TEXTURE_NODE, asset: this.props.nodeTexture },
+			{ key: TEXTURE_NODE_START, asset: this.props.nodeStartTexture ?? this.props.nodeTexture },
+			{ key: TEXTURE_NODE_END, asset: this.props.nodeEndTexture ?? this.props.nodeTexture },
 			{ key: TEXTURE_PATH, asset: this.props.pathTexture },
 			{ key: TEXTURE_EMPTY, asset: this.props.emptyTexture },
 			{ key: TEXTURE_BOARD, asset: this.props.boardTexture },
@@ -403,18 +418,17 @@ export class FlowCoreAPI extends Component<typeof FlowCoreAPI> {
 		this.events.NODE_UNLIT.subscribe(() => this.applyGridVisuals());
 		this.events.DRAW_ENDED.subscribe(() => this.applyGridVisuals());
 
-		this.events.PATH_COMPLETED.subscribe((color) => {
-			console.log(`[FlowCoreAPI] Path completed: ${color}`);
-		});
-		this.events.PATH_BROKEN.subscribe((color) => {
-			console.log(`[FlowCoreAPI] Path broken: ${color}`);
-		});
+		// **경로 완성/끊김은 로그로 남기지 않는다.** 선을 그리는 동안 두 이벤트가 번갈아
+		// 수십 번 오는데, Horizon 의 `console.log` 는 그 빈도로 부르면 드래그가 끊겨 보인다.
+		// 완성 여부는 전구 색과 테두리가 이미 실시간으로 알려 준다 (worker/NextJob.md 1번).
 
 		this.events.QUEST_CLEAR.subscribe(this.onQuestEnd.bind(this));
 		this.events.QUEST_FAILED.subscribe(this.onQuestEnd.bind(this));
 	}
 
 	private onLevelLoaded(level: FlowLevel): void {
+		// 이 판에 쓰인 색부터 A, B, C ... 를 붙인다 - 짝을 글자로 찾을 수 있게 한다
+		this._pairLabels = assignFlowPairLabels(level.nodes);
 		this.applyGridVisuals();
 
 		PuzzleBoardStage.instance.mount(this._presenter);
@@ -434,6 +448,12 @@ export class FlowCoreAPI extends Component<typeof FlowCoreAPI> {
 	}
 
 	/** 전체 격자를 현재 배치와 경로로 다시 칠한다 */
+	/**
+	 * 색 -> 짝 글자. 레벨이 열릴 때 **판에 나온 순서**로 채운다.
+	 * 비어 있으면 글자를 그리지 않는다 (레벨을 아직 열지 않은 상태).
+	 */
+	private _pairLabels: Map<string, string> = new Map();
+
 	private applyGridVisuals(): void {
 		const board = this.session.board;
 		if (board === undefined) {
@@ -473,11 +493,17 @@ export class FlowCoreAPI extends Component<typeof FlowCoreAPI> {
 					fill: this.getNodeColor(node.color, isMain),
 					// 전구(메인) / 선이 지나간 칸 / 아직 빈 칸 셋을 구분해 그림을 고른다
 					texture: isMain
-						? TEXTURE_NODE
+						? (node.role === ENodeRole.START ? TEXTURE_NODE_START : TEXTURE_NODE_END)
 						: (node.color === undefined ? TEXTURE_EMPTY : TEXTURE_PATH),
-					label: '',
-					// §4 - 메인 오브젝트(출발/도착)와 지금 그리는 머리를 테두리로 구분한다
-					isHighlighted: isMain || isHead,
+					// 짝 글자를 전구에만 얹는다. 두 전구가 같은 글자를 달고 있어 짝이 보이고,
+					// 출발 지점에는 `*` 가 하나 더 붙어 어디서 그리기 시작할지 알 수 있다.
+					// 선이 지나간 칸에는 글자를 붙이지 않는다 - 붙이면 판이 글자로 뒤덮인다.
+					label: getFlowNodeLabel(node, this._pairLabels),
+					labelColor: COLOR_NODE_LABEL,
+					// §4 - 전구를 테두리로 알린다. **머리에는 테두리를 주지 않는다** -
+					// 예전에는 둘이 같은 테두리를 써서 그리다 만 선 끝이 전구처럼 보였다.
+					// 머리는 아래의 `GRABBED` 로 떠오르고 빛나므로 그것만으로 충분히 구분된다.
+					isHighlighted: isMain,
 					// 지금 그리고 있는 머리는 떠올라 빛난다 - 선이 손가락 끝을 따라오는 것이 보인다.
 					// 손가락이 머리를 가려도 커진 만큼 밖으로 삐져나와 어디까지 그렸는지 알 수 있다.
 					accent: isHead ? EBoardCellAccent.GRABBED : EBoardCellAccent.NONE,

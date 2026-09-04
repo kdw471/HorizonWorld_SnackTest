@@ -85,6 +85,7 @@ import {
 	getDefaultCanvas,
 	getLayoutProfile,
 	getUsableHeightPercent,
+	clampNumber,
 	percentOf,
 	resolveCanvas,
 	toUIDeviceClass,
@@ -126,6 +127,12 @@ const CATALOG_COLUMNS_PORTRAIT = 2;
 const CATALOG_WIDTH_BUDGET_PERCENT = 88;
 /** 퍼즐 격자가 쓰는 세로 (%) - 제목 줄을 뺀 나머지 */
 const CATALOG_GRID_HEIGHT_PERCENT = 82;
+
+/**
+ * `screenPixelRatio` 의 기본값 - 실기 측정값(1179 / 590 = 2) 이다.
+ * **prop 기본값 및 보드 패널의 같은 상수와 반드시 같은 값이어야 한다.**
+ */
+const DEFAULT_SCREEN_PIXEL_RATIO = 2;
 
 /**
  * 인게임 상단 바의 높이 (%).
@@ -173,6 +180,18 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		 * 이 패널과 같은 Local 소유로 두면 된다.
 		 */
 		countdownSound: { type: PropTypes.Entity },
+
+		/**
+		 * `screenWidth/Height` 읽기값을 **패널 좌표 단위**로 옮기는 배율.
+		 *
+		 * 보드 패널과 **같은 값**을 넣어야 한다 (`PuzzleBoardUI_Panel.screenPixelRatio` -
+		 * 재는 법과 근거가 거기 있다). 실기 측정에서 1179x2556 폰이 590x1280 으로 읽혔으므로 2 다.
+		 *
+		 * 이 패널은 배치가 아직 퍼센트·픽셀 혼합이라, 보드와 달리 이 값이 **여백과 글자 크기
+		 * 모두**에 영향을 준다. 값이 절반이면 글자도 절반으로 그려진다 - 모바일에서 메뉴
+		 * 글씨가 깨알 같던 원인이 이것이었다.
+		 */
+		screenPixelRatio: { type: PropTypes.Number, default: 2 },
 
 		/**
 		 * 캔버스 크기를 직접 못박는다 (px). 둘 다 0 이면 화면 비율에서 자동으로 잡는다.
@@ -223,6 +242,39 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 	private _profile: PuzzleUILayoutProfile = getLayoutProfile(EUIDeviceClass.DESKTOP);
 	/** 안전 여백을 물리고 남는 세로 길이 (px). 버튼 글자 크기가 여기서 나온다 */
 	private _usableHeight: number = PUZZLE_UI_CANVAS_HEIGHT;
+
+	/**
+	 * `screenPixelRatio` prop 을 담아 두는 자리. `resolveLayout()` 에서 채운다.
+	 *
+	 * **필드 초기화에서 `this.props` 를 읽으면 컴포넌트가 아예 만들어지지 않는다**
+	 * (보드 패널에서 실제로 겪었다 - `작업기록_2026-09-03_보드UI_상대배치_전면개편.md` §5).
+	 * 그래서 여기서도 prop 은 `resolveLayout()` 에서 한 번만 읽어 이 필드에 넣는다.
+	 */
+	private _pixelRatio: number = DEFAULT_SCREEN_PIXEL_RATIO;
+
+	/** `screenWidth/Height` 원본 읽기값 - 좌표 단위 환산의 출발점이다 */
+	private _rawScreenHeight: number = 0;
+
+	/**
+	 * 화면 세로를 **패널 좌표 단위**로 나타낸 값.
+	 *
+	 * 읽기값(`screenHeight`)은 긴 변을 1280 으로 정규화한 값이고, 패널이 실제로 그려지는
+	 * 좌표계는 디바이스 실픽셀이다 (`PuzzleUI_RelativeLayout` 머리말). 그 차이가 `_pixelRatio` 다.
+	 */
+	private get screenUnitsHeight(): number {
+		const reading = this._rawScreenHeight > 0 ? this._rawScreenHeight : this._canvas.height;
+		return Math.max(1, reading * this._pixelRatio);
+	}
+
+	/** 기준 캔버스(세로 1180) 픽셀로 튜닝한 상수를 좌표 단위로 환산하는 배율 */
+	private get pxScale(): number {
+		return canvasPixelScale(this.screenUnitsHeight);
+	}
+
+	/** 기준 캔버스 픽셀 값을 좌표 단위로 (최소 1) - 모서리 둥글기·잔여백에 쓴다 */
+	private px(referencePixels: number): number {
+		return Math.max(1, Math.round(referencePixels * this.pxScale));
+	}
 
 	private readonly _screen: Binding<string> = new Binding<string>(EPuzzleHubScreen.MAIN_MENU as string);
 
@@ -327,7 +379,8 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		}
 		else {
 			const player = this.entity.owner.get();
-			this._canvas = resolveCanvas(player.screenWidth.get(), player.screenHeight.get());
+			this._rawScreenHeight = player.screenHeight.get();
+			this._canvas = resolveCanvas(player.screenWidth.get(), this._rawScreenHeight);
 		}
 		this.panelWidth = this._canvas.width;
 		this.panelHeight = this._canvas.height;
@@ -351,11 +404,23 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		this.applyCanvasSize();
 		this._catalogColumns = getCatalogColumns(this._canvas);
 
-		this._safeArea = computeSafeAreaPixels(this._profile, this._canvas);
-		this._usableHeight = percentOf(this.panelHeight, getUsableHeightPercent(this._profile));
+		// 글자·여백 환산 배율을 먼저 받아 둔다 (`_pixelRatio` 주석 - 여기서만 prop 을 읽는다)
+		this._pixelRatio = clampNumber(this.props.screenPixelRatio, 0.25, 8);
+
+		// **좌표 단위로 잡는다.** 예전에는 캔버스(=읽기값) 픽셀로 잡아서 여백과 글자가 실제의
+		// 절반으로 그려졌다 - 모바일에서 메뉴 글씨가 깨알 같고 제목이 노치에 잘리던 원인이다.
+		const safeArea = computeSafeAreaPixels(this._profile, this._canvas);
+		this._safeArea = {
+			top: Math.round(safeArea.top * this._pixelRatio),
+			bottom: Math.round(safeArea.bottom * this._pixelRatio),
+			left: Math.round(safeArea.left * this._pixelRatio),
+			right: Math.round(safeArea.right * this._pixelRatio),
+		};
+		this._usableHeight = percentOf(this.screenUnitsHeight, getUsableHeightPercent(this._profile));
 		console.log(`[PuzzleHub] Layout for ${this._profile.deviceClass}: `
 			+ `canvas ${this._canvas.width}x${this._canvas.height} `
 			+ `(${this._canvas.isLandscape ? 'landscape' : 'portrait'}), `
+			+ `units ${Math.round(this.screenUnitsHeight)} (ratio ${this._pixelRatio}), `
 			+ `${this._catalogColumns} menu columns.`);
 	}
 
@@ -580,7 +645,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 			ratio: options.ratio,
 			minimum: options.minimum,
 			maximum: options.maximum,
-			scale: this._profile.fontScale, pixelScale: canvasPixelScale(this._canvas.height),
+			scale: this._profile.fontScale, pixelScale: this.pxScale,
 		});
 	}
 
@@ -623,7 +688,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 	 * (`PuzzleUI_Layout` 머리말 §4).
 	 */
 	private vh(percent: number): number {
-		return verticalPixels(this._canvas, percent);
+		return Math.round(Math.max(0, percent) / 100 * this.screenUnitsHeight);
 	}
 
 	/** 화면 표시 여부를 screen 바인딩에서 파생한다 */
@@ -636,7 +701,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		// 8종을 열 수로 나눈 행 수만큼 세로를 쪼갠다. 가로 화면은 4열 x 2행이라
 		// 버튼이 세로로 두 배 커지고, 세로 화면은 예전 그대로 2열 x 4행이다.
 		const rowCount = Math.ceil(PUZZLE_CATALOG.length / this._catalogColumns);
-		// 격자 영역(82%)을 행 수로 나누고, 버튼 사이 여백(위아래 2%씩)을 뺀다
+		// 격자 영역(82%)을 행 수로 나누고, 버튼 사이 위아래 여백 몫을 뺀다
 		const buttonHeightPercent = Math.max(8, Math.floor(CATALOG_GRID_HEIGHT_PERCENT / rowCount) - 4);
 		const catalogButtonHeightPercent = `${buttonHeightPercent}%`;
 		const buttonHeight = percentOf(this._usableHeight, buttonHeightPercent);
@@ -648,8 +713,9 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				fontWeight: 'bold',
 				textAlign: 'center',
 				width: '100%',
-				height: '10%',
-				marginTop: this.vh(4),
+				height: '8%',
+				// 위쪽 픽셀 여백은 두지 않는다 - 뿌리의 justifyContent: 'center' 가
+				// 제목+격자 묶음을 통째로 세로 중앙에 놓는다 (상세 화면과 같은 방식)
 			},
 		});
 
@@ -673,7 +739,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 							color: COLOR_TEXT,
 							// 글자가 버튼 크기를 따라간다 - 모바일에서 글자만 작게 남는 것을 없앱다
 							fontSize: fitFontSize(buttonHeight, {
-								ratio: 0.17, minimum: 18, maximum: 34, scale: this._profile.fontScale, pixelScale: canvasPixelScale(this._canvas.height),
+								ratio: 0.3, minimum: 18, maximum: 34, scale: this._profile.fontScale, pixelScale: this.pxScale,
 							}),
 							fontWeight: 'bold',
 							textAlign: 'center',
@@ -685,7 +751,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 						style: {
 							color: COLOR_TEXT,
 							fontSize: fitFontSize(buttonHeight, {
-								ratio: 0.1, minimum: 12, maximum: 20, scale: this._profile.fontScale, pixelScale: canvasPixelScale(this._canvas.height),
+								ratio: 0.25, minimum: 12, maximum: 20, scale: this._profile.fontScale, pixelScale: this.pxScale,
 							}),
 							textAlign: 'center',
 							width: '100%',
@@ -697,27 +763,36 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 						style: {
 							color: COLOR_TEXT,
 							fontSize: fitFontSize(buttonHeight, {
-								ratio: 0.09, minimum: 11, maximum: 18, scale: this._profile.fontScale, pixelScale: canvasPixelScale(this._canvas.height),
+								ratio: 0.15, minimum: 11, maximum: 18, scale: this._profile.fontScale, pixelScale: this.pxScale,
 							}),
 							textAlign: 'center',
 							width: '100%',
 							opacity: 0.6,
-							marginTop: 2,
+							marginTop: this.px(2),
 						},
 					}),
 				],
 				style: {
 					// 세로 화면 2열 x 4행 / 가로 화면 4열 x 2행.
-					// 폭 = 88% / 열 수, 좌우 여백 2% 씩이 더해져 한 줄에 딱 맞는다.
+					// 폭 = 88% / 열 수, 좌우 여백 2% 씩이 더해져 한 줄이 정확히 96% 다.
 					width: `${Math.floor(CATALOG_WIDTH_BUDGET_PERCENT / this._catalogColumns)}%`,
 					height: catalogButtonHeightPercent,
-					margin: this.vh(2),
-					borderRadius: 12,
+					// **좌우 여백은 반드시 % 로.** vh(2) 픽셀을 네 방향에 걸었을 때는 실기에서
+					// (버튼 44% + 픽셀 여백) x 2 가 한 줄을 넘어 flexWrap 이 전부 다음 줄로
+					// 밀어냈다 - 격자가 1열로 무너져 화면 밖까지 흘러넘친 원인이다.
+					// Yoga 는 margin % 를 부모 *가로* 기준으로 재므로 좌우에는 % 가 정확하다.
+					marginLeft: '2%',
+					marginRight: '2%',
+					marginTop: this.vh(1),
+					marginBottom: this.vh(1),
+					borderRadius: this.px(12),
 					justifyContent: 'center',
 					backgroundColor: isAvailable.derive((available) => (available ? COLOR_BUTTON : COLOR_BUTTON_DIM)),
 					opacity: isAvailable.derive((available) => (available ? 1 : 0.55)),
 				},
-				onClick: () => { this._model?.selectPuzzle(entry.id); },
+				// 모든 허브 버튼은 `onPress`(누르는 순간) - `onClick` 은 릴리즈 뒤에 와서
+				// 탭 한 번에 ~100ms 가 더 걸린다 (mobile-touch-ux: 반응은 즉각).
+				onPress: () => { this._model?.selectPuzzle(entry.id); },
 			}));
 		}
 
@@ -742,6 +817,11 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				position: 'absolute',
 				// 배경은 패널 끝까지, 내용만 안전 영역 안으로
 				...this.screenPadding(),
+				// **세로 한가운데.** 제목과 격자를 한 덩어리로 보고 위아래 남는 자리를
+				// 똑같이 나눈다 - 상세 화면과 같은 흐름 정렬이라 어느 화면 크기에서도 중앙이다
+				flexDirection: 'column',
+				justifyContent: 'center',
+				alignItems: 'center',
 				backgroundColor: COLOR_BACKGROUND,
 				display: this.visibleWhen((screen) => screen === EPuzzleHubScreen.MAIN_MENU),
 			},
@@ -749,8 +829,13 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 	}
 
 	/**
-	 * 퍼즐 상세 - 고른 퍼즐이 화면을 꽉 채우고 Start / Continue / Return 을 세로로 놓는다.
+	 * 퍼즐 상세 - 제목·부제·진행도 아래에 Start / Continue / Return 을 세로로 놓는다.
 	 * 세 버튼의 폭·높이·간격을 같게 두어 엄지로 잘못 누르는 일을 줄인다 (PUZ_00 §8).
+	 *
+	 * **화면 세로의 한가운데에 모아 놓는다** (`justifyContent: 'center'`). 예전에는 위에서부터
+	 * 쌓고 `marginTop` 픽셀로 밀어 내렸는데, 그 픽셀이 실제의 절반으로 그려지면서 세 버튼이
+	 * 화면 위쪽에 몰리고 아래 절반이 통째로 비었다. 메인 메뉴의 격자와 같은 인상을 주려면
+	 * 흐름의 정렬로 가운데를 잡아야 하고, 그러면 어느 화면 크기에서도 중앙에 온다.
 	 */
 	private createDetailScreen(): UINode {
 		const title = Text({
@@ -761,7 +846,6 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				fontWeight: 'bold',
 				textAlign: 'center',
 				width: '100%',
-				marginTop: this.vh(12),
 			},
 		});
 		const subtitle = Text({
@@ -772,7 +856,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				textAlign: 'center',
 				width: '100%',
 				opacity: 0.8,
-				marginTop: this.vh(2),
+				marginTop: this.vh(1.5),
 			},
 		});
 		const progress = Text({
@@ -803,7 +887,9 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 			],
 			style: {
 				width: '100%',
-				marginTop: this.vh(10),
+				// 제목 묶음과의 틈. 예전의 30% 는 "위에서부터 쌓기" 를 전제로 한 값이었다 -
+				// 가운데 정렬에서는 이만큼만 있으면 두 덩어리가 분리되어 보인다
+				marginTop: this.vh(5),
 				// 세로 배치 - 세 버튼이 위에서 아래로 쌓인다
 				flexDirection: 'column',
 				alignItems: 'center',
@@ -817,6 +903,10 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				height: '100%',
 				position: 'absolute',
 				...this.screenPadding(),
+				// **세로 한가운데.** 내용 전체를 한 덩어리로 보고 위아래 남는 자리를 똑같이 나눈다
+				flexDirection: 'column',
+				justifyContent: 'center',
+				alignItems: 'center',
 				backgroundColor: COLOR_BACKGROUND,
 				display: this.visibleWhen((screen) => screen === EPuzzleHubScreen.PUZZLE_DETAIL),
 			},
@@ -831,7 +921,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		label: Binding<string>,
 		color: Color,
 		isEnabled: Binding<boolean> | undefined,
-		onClick: () => void,
+		onPress: () => void,
 	): UINode {
 		const height = Math.max(11, this._profile.minButtonHeightPercent);
 		return Pressable({
@@ -851,7 +941,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				width: '64%',
 				height: `${height}%`,
 				marginBottom: this.vh(4),
-				borderRadius: 14,
+				borderRadius: this.px(14),
 				justifyContent: 'center',
 				backgroundColor: isEnabled === undefined
 					? color
@@ -860,7 +950,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 					? 1
 					: isEnabled.derive((enabled) => (enabled ? 1 : 0.5)),
 			},
-			onClick: onClick,
+			onPress: onPress,
 		});
 	}
 
@@ -933,11 +1023,11 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 						width: '85%',
 						height: '96%',
 						alignSelf: 'flex-end',
-						borderRadius: 10,
+						borderRadius: this.px(10),
 						justifyContent: 'center',
 						backgroundColor: COLOR_PANEL,
 					},
-					onClick: () => { this._model?.pauseGame(); },
+					onPress: () => { this._model?.pauseGame(); },
 				}),
 			],
 			style: { width: '22%', justifyContent: 'center' },
@@ -1006,7 +1096,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 	}
 
 	/** 시스템 메뉴의 버튼 하나. 세을 같은 크기로 둔다 */
-	private createPauseButton(label: string, color: Color, onClick: () => void): UINode {
+	private createPauseButton(label: string, color: Color, onPress: () => void): UINode {
 		const height = Math.max(10, this._profile.minButtonHeightPercent);
 		return Pressable({
 			children: [
@@ -1026,11 +1116,11 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				height: `${height}%`,
 				alignSelf: 'center',
 				marginTop: this.vh(5),
-				borderRadius: 14,
+				borderRadius: this.px(14),
 				justifyContent: 'center',
 				backgroundColor: color,
 			},
-			onClick: onClick,
+			onPress: onPress,
 		});
 	}
 
@@ -1103,7 +1193,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		label: string,
 		color: Color,
 		isVisible: Binding<boolean> | undefined,
-		onClick: () => void,
+		onPress: () => void,
 	): UINode {
 		const height = Math.max(10, this._profile.minButtonHeightPercent);
 		return Pressable({
@@ -1124,14 +1214,14 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				height: `${height}%`,
 				alignSelf: 'center',
 				marginTop: this.vh(4),
-				borderRadius: 14,
+				borderRadius: this.px(14),
 				justifyContent: 'center',
 				backgroundColor: color,
 				display: isVisible === undefined
 					? 'flex'
 					: isVisible.derive((visible) => (visible ? 'flex' : 'none')),
 			},
-			onClick: onClick,
+			onPress: onPress,
 		});
 	}
 
@@ -1155,7 +1245,7 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 				position: 'absolute',
 				// 아래쪽 안전 영역(홈 인디케이터·Horizon 이동 버튼) 위로 띄운다
 				bottom: this._safeArea.bottom + this.vh(2),
-				borderRadius: 12,
+				borderRadius: this.px(12),
 				justifyContent: 'center',
 				backgroundColor: COLOR_PANEL,
 				opacity: 0.95,

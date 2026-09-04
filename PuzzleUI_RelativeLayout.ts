@@ -74,10 +74,21 @@ const MAX_SINGLE_INSET_PERCENT = 25;
 export const TRAY_HEIGHT_USAGE = 0.78;
 /** 트레이가 보조 레이아웃 가로에서 쓰는 비율 - 나머지는 리셋 버튼과 여백이다 */
 export const TRAY_WIDTH_USAGE = 0.66;
-/** 한 페이지에 적어도 보이게 할 슬롯 수 - 이보다 적게 보이면 넘기기가 고역이 된다 */
-export const TRAY_MIN_VISIBLE_SLOTS = 3;
-/** 한 페이지에 이보다 많이 넣지 않는다 - 넘어가면 부품이 손가락보다 작아진다 */
+/**
+ * 한 페이지에 이보다 많이 넣지 않는다 - 넘어가면 부품이 손가락보다 작아진다.
+ *
+ * 짝이던 `TRAY_MIN_VISIBLE_SLOTS`(적어도 셋은 보이게)는 없앴다. 들어갈 자리가 없는데도
+ * 셋을 펴다가 부품이 잘려 나간 것이 2026-09-04 의 버그였다 (`trayGrid` 머리말).
+ * 지금은 **들어가는 배치만 고르고**, 그래도 모자라면 줄을 쌓는다.
+ */
 export const TRAY_MAX_VISIBLE_SLOTS = 8;
+/**
+ * 트레이를 몇 줄까지 쌓을지.
+ *
+ * 줄을 늘리면 슬롯이 그만큼 작아진다 (슬롯 한 변 = 트레이 높이 / 줄 수). 세 줄이면
+ * 슬롯이 트레이 높이의 1/3 인데, 그 아래로 내려가면 부품이 손가락보다 작아진다.
+ */
+export const TRAY_MAX_ROWS = 3;
 
 /** 에디터에서 넘어오는 요청값. 전부 생략 가능하고, 생략하면 위 기본값이 쓰인다 */
 export type PuzzleBoardRelativeRequest = {
@@ -222,46 +233,216 @@ export function cellFraction(
 	return { ofWidth: board.ofWidth / span, ofHeight: board.ofHeight / span };
 }
 
+
 /**
- * 트레이 슬롯 한 변이 화면에서 차지하는 비율.
+ * 화면 -> 격자 변환에 필요한 전부 - 패널이 확정한 상대 배치와 화면 비율.
  *
- * 슬롯은 정사각형이고 트레이 높이를 꽉 채운다 (`height:'100%' + aspectRatio:1`).
- * 그래서 세로 기준 비율이 곧 슬롯 크기다.
+ * 패널(`PuzzleBoardUI_Panel.resolveLayout`)이 이 두 값을 `PuzzleBoardStage` 에 실어 두면,
+ * 드래그 스트림(`Puzzle_HorizonBridge.PuzzleScreenDragStream`)이 Focused Interaction 의
+ * 정규화 화면 좌표를 아래 `screenPointToGridPoint()` 로 격자 좌표로 바꾼다
+ * (드래그 반응속도 개선 제안 §3 제안 1).
  */
-export function traySlotFraction(
+export type PuzzleScreenGridGeometry = {
 	layout: PuzzleBoardRelativeLayout,
+	/** 화면 가로/세로. 읽기값의 단위는 못 믿어도 비율은 믿을 수 있다 (머리말) */
 	screenAspect: number,
-): PuzzleScreenFraction {
-	const aspect = clamp(screenAspect, 0.1, 10);
-	const ofHeight = auxAreaFraction(layout) * TRAY_HEIGHT_USAGE;
-	return { ofHeight: ofHeight, ofWidth: ofHeight / aspect };
+};
+
+/** 연속 격자 좌표 - 정수가 칸 중심이다. 드래그 컨트롤러가 받는 형태 그대로다 */
+export type PuzzleContinuousGridPoint = {
+	row: number,
+	col: number,
+};
+
+/**
+ * **정규화 화면 좌표(0~1) -> 연속 격자 좌표** (제안 1 의 핵심 변환).
+ *
+ * 패널의 상대 배치를 그대로 따라 격자 사각형을 화면 비율로 복원한다.
+ *
+ *   세로 흐름: topInset -> 본 격자 영역(boardAreaFraction) -> 보조 -> bottomInset
+ *   보드 정사각형: 본 격자 영역의 세로 boardHeightPercent%, 화면 가로 boardWidthPercent%
+ *                 중 작은 쪽 (`boardSquareFraction`) - 영역 안에서 상하좌우 중앙 정렬
+ *   격자 상자: 정사각 판 대비 cols/span x rows/span (`computeGridBox`) - 판 안에서 중앙 정렬
+ *
+ * 반환은 **연속 좌표**다 - 정수가 칸 중심이고, 격자 밖이면 범위를 벗어난 값이 나온다.
+ * 잘라내지 않는 것이 §8.4 (판 밖으로 나가도 드래그 유지) 규약이다 - 경계 클램프는
+ * 각 퍼즐의 드래그 컨트롤러가 담당한다. 좌표를 만들 수 없으면 undefined.
+ *
+ * `screenY` 는 **화면 위가 0** 인 값으로 가정한다. Focused Interaction 의 `screenPosition`
+ * 이 반대(아래가 0)로 오는 것이 기기 실험에서 확인되면 호출부가 `1 - y` 로 뒤집는다
+ * (`Puzzle_HorizonBridge` 의 `SCREEN_POSITION_Y_IS_TOP_DOWN`).
+ */
+export function screenPointToGridPoint(
+	geometry: PuzzleScreenGridGeometry,
+	rowCount: number,
+	colCount: number,
+	screenX: number,
+	screenY: number,
+): PuzzleContinuousGridPoint | undefined {
+	if (isFinite(screenX) === false || isFinite(screenY) === false) {
+		return undefined;
+	}
+	const rows = Math.max(0, Math.floor(rowCount));
+	const cols = Math.max(0, Math.floor(colCount));
+	const span = Math.max(rows, cols);
+	if (span <= 0) {
+		return undefined;
+	}
+
+	const layout = geometry.layout;
+	// 보드 정사각형의 한 변 - 화면 가로 대비 / 세로 대비 (같은 길이의 두 표현)
+	const square = boardSquareFraction(layout, geometry.screenAspect);
+	if (square.ofWidth <= 0 || square.ofHeight <= 0) {
+		return undefined;
+	}
+
+	// 판은 본 격자 영역 안에서 상하좌우 중앙 정렬이다 (`createBoardArea` 의 center 정렬)
+	const squareLeft = (1 - square.ofWidth) / 2;
+	const boardAreaTop = layout.topInsetPercent / 100;
+	const squareTop = boardAreaTop + (boardAreaFraction(layout) - square.ofHeight) / 2;
+
+	// 격자 상자는 판 대비 cols/span x rows/span 이고 판 안에서 중앙 정렬이다 (`computeGridBox`)
+	const gridWidth = square.ofWidth * cols / span;
+	const gridHeight = square.ofHeight * rows / span;
+	const gridLeft = squareLeft + (square.ofWidth - gridWidth) / 2;
+	const gridTop = squareTop + (square.ofHeight - gridHeight) / 2;
+
+	// 칸 한 변 - 판 한 변을 span 으로 나눈 값 (`cellFraction` 과 같은 규칙)
+	const cellWidth = square.ofWidth / span;
+	const cellHeight = square.ofHeight / span;
+
+	// 정수 = 칸 중심. 칸 c 의 구간은 [gridLeft + c*cell, gridLeft + (c+1)*cell] 이다
+	return {
+		row: (screenY - gridTop) / cellHeight - 0.5,
+		col: (screenX - gridLeft) / cellWidth - 0.5,
+	};
 }
 
 /**
- * 한 페이지에 늘어놓을 슬롯 수.
+ * 트레이를 몇 줄 몇 칸으로 늘어놓을지 - **부품이 잘리지 않게 하는 계산**이다.
  *
- * 슬롯은 트레이 높이만 한 정사각형이므로, 트레이 폭을 슬롯 한 변으로 나누면 몇 개가
- * 들어가는지 나온다. **두 길이 다 화면 비율로만 표현되므로 절대 픽셀이 필요 없다** -
- * 픽셀로 나누던 예전 계산(`computeTrayPageSize`)이 이것으로 대체된다.
+ * ## 왜 한 줄로는 안 되는가
  *
- * 좁은 화면에서 한 번에 하나씩만 보이면 부품 일곱 개를 보려고 여섯 번을 넘겨야 하므로
- * 최소 세 개는 보이게 하고(그만큼 슬롯이 작아진다), 반대로 너무 많이 넣어 부품이
- * 손가락보다 작아지지 않도록 위도 막는다.
+ * 예전에는 슬롯을 한 줄로만 늘어놓고 "트레이 폭 / 슬롯 한 변" 으로 몇 개가 들어가는지
+ * 셌다. 그런데 슬롯은 **트레이 높이를 꽉 채우는 정사각형**이라, 세로로 긴 화면에서는
+ * 슬롯 하나가 화면 폭의 절반 가까이 된다. 실측(iPhone, 590x1280 읽기값, 비율 0.46)에서
+ * 슬롯 한 변이 화면 폭의 44% 였고, 그래서 한 줄에 **하나밖에** 들어가지 않았다.
+ *
+ * 그런데도 계산은 `TRAY_MIN_VISIBLE_SLOTS`(3) 로 끌어올린 3 을 돌려주었다. 들어가지도
+ * 않는 셋을 편 뒤 `overflow: hidden` 이 양옆을 잘라내서, 가운데 슬롯만 보이고 **정작
+ * 부품이 든 첫 슬롯은 화면 밖으로 잘려 나갔다.** "크리스탈이 아예 안 보인다" 의 정체다.
+ *
+ * ## 대신 줄을 쌓는다
+ *
+ * 폭이 모자라면 슬롯을 줄여 억지로 밀어 넣는 대신 **여러 줄로 나눈다.** 줄이 늘면 슬롯
+ * 한 변(= 트레이 높이 / 줄 수)이 작아지고, 그만큼 한 줄에 더 많이 들어간다. 그래서
+ * 부품 수와 화면 비율에 따라 1x1 · 2x2 · 3x3 이 자연히 나온다.
+ *
+ * ## 고르는 규칙
+ *
+ * 열 수를 1 부터 훑으며 **슬롯이 가장 커지는 배치**를 고른다. 후보가 성립하려면 둘 다
+ * 만족해야 한다.
+ *
+ *   줄 수 = ceil(부품 수 / 열 수) 가 `TRAY_MAX_ROWS` 이하   (너무 잘아지지 않게)
+ *   열 수 x 슬롯 한 변 <= 트레이 폭                          (**가로로 넘치지 않게**)
+ *
+ * 두 번째 조건이 이 함수의 핵심이다 - 넘치는 배치는 애초에 후보가 되지 않으므로,
+ * 잘려서 안 보이는 슬롯이 생길 수 없다.
+ *
+ * 부품이 너무 많아 어느 배치도 성립하지 않으면 그때만 페이지를 나눈다 (화살표로 넘긴다).
+ */
+export type PuzzleTrayGrid = {
+	/** 줄 수 */
+	rows: number,
+	/** 한 줄에 놓는 칸 수 */
+	cols: number,
+	/** 한 페이지에 실제로 늘어놓는 슬롯 수 (부품 수를 넘지 않는다) */
+	perPage: number,
+	/** 슬롯 한 변이 화면에서 차지하는 비율 - 글자 크기가 여기서 나온다 */
+	slot: PuzzleScreenFraction,
+	/**
+	 * 슬롯 한 변을 **트레이 높이 대비 %** 로 나타낸 값 - 패널이 그대로 스타일에 넣는다.
+	 *
+	 * 슬롯은 `height: 이 값 + aspectRatio: 1` 로 그려지므로, 이 한 값이 슬롯 크기를 통째로
+	 * 정한다. 100/rows 가 아닌 이유는 **가로가 모자랄 때는 세로를 다 쓰지 않기** 때문이다
+	 * (`trayGrid` 의 `min`).
+	 */
+	slotHeightPercent: number,
+};
+
+export function trayGrid(
+	layout: PuzzleBoardRelativeLayout,
+	screenAspect: number,
+	slotCount: number,
+): PuzzleTrayGrid {
+	const aspect = clamp(screenAspect, 0.1, 10);
+	const total = Math.max(0, Math.floor(slotCount));
+	if (total <= 0) {
+		return { rows: 0, cols: 0, perPage: 0, slot: { ofWidth: 0, ofHeight: 0 }, slotHeightPercent: 100 };
+	}
+
+	// **두 축을 같은 자로 잰다.** 트레이 세로를 화면 '가로' 단위로 옮겨 두면
+	// 폭과 높이를 직접 견줄 수 있다 (화면 세로 1 = 화면 가로 1/aspect).
+	const trayWidth = TRAY_WIDTH_USAGE;
+	const trayHeight = auxAreaFraction(layout) * TRAY_HEIGHT_USAGE / aspect;
+
+	const shown = Math.min(total, TRAY_MAX_VISIBLE_SLOTS);
+	let best: PuzzleTrayGrid | undefined = undefined;
+	for (let cols = 1; cols <= shown; cols++) {
+		const rows = Math.ceil(shown / cols);
+		if (rows > TRAY_MAX_ROWS) {
+			continue;
+		}
+		// **두 제약을 한꺼번에 건다.** 세로로는 줄 수만큼 나눠 갖고, 가로로는 칸 수만큼
+		// 나눠 갖는다. 둘 중 작은 쪽이 슬롯 크기이므로 어느 쪽으로도 넘치지 않는다.
+		const side = Math.min(trayHeight / rows, trayWidth / cols);
+		if (best !== undefined && side <= best.slot.ofWidth) {
+			// 이미 더 큰 슬롯을 찾았다. 같은 크기면 줄이 적은 앞의 후보를 남긴다
+			continue;
+		}
+		best = makeTrayGrid(rows, cols, shown, side, aspect, trayHeight);
+	}
+	if (best !== undefined) {
+		return best;
+	}
+
+	// 부품이 너무 많아 `TRAY_MAX_ROWS` 로도 한 페이지에 담기지 않는다 -
+	// 가장 잘게 쪼갠 뒤 나머지는 화살표로 넘긴다.
+	const rows = TRAY_MAX_ROWS;
+	const side = Math.min(trayHeight / rows, trayWidth);
+	const cols = side > 0 ? Math.max(1, Math.floor(trayWidth / side)) : 1;
+	return makeTrayGrid(rows, cols, Math.max(1, Math.min(total, rows * cols)), side, aspect, trayHeight);
+}
+
+/** 고른 배치를 `PuzzleTrayGrid` 로 - 높이 %는 트레이 높이 대비다 (`slotHeightPercent`) */
+function makeTrayGrid(
+	rows: number,
+	cols: number,
+	perPage: number,
+	side: number,
+	aspect: number,
+	trayHeight: number,
+): PuzzleTrayGrid {
+	return {
+		rows: rows,
+		cols: cols,
+		perPage: perPage,
+		slot: { ofWidth: side, ofHeight: side * aspect },
+		// 슬롯과 트레이를 같은 자(가로 단위)로 재고 있으므로 비율이 그대로 %가 된다
+		slotHeightPercent: trayHeight > 0 ? clamp(100 * side / trayHeight, 1, 100) : 100,
+	};
+}
+
+/**
+ * 한 페이지에 늘어놓을 슬롯 수 - `trayGrid()` 가 정한 값 그대로다.
+ * 페이지 계산만 필요한 곳에서 쓴다.
  */
 export function traySlotsPerPage(
 	layout: PuzzleBoardRelativeLayout,
 	screenAspect: number,
 	slotCount: number,
 ): number {
-	const total = Math.max(0, Math.floor(slotCount));
-	if (total <= 0) {
-		return 0;
-	}
-	const slot = traySlotFraction(layout, screenAspect);
-	const trayWidth = TRAY_WIDTH_USAGE;
-	const fits = slot.ofWidth > 0 ? Math.floor(trayWidth / slot.ofWidth) : TRAY_MIN_VISIBLE_SLOTS;
-	const perPage = clamp(fits, TRAY_MIN_VISIBLE_SLOTS, TRAY_MAX_VISIBLE_SLOTS);
-	return Math.max(1, Math.min(total, Math.floor(perPage)));
+	return trayGrid(layout, screenAspect, slotCount).perPage;
 }
 
 /** 슬롯 수와 페이지 크기에서 전체 페이지 수 */

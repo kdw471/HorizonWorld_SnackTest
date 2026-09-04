@@ -209,7 +209,9 @@ export class SlidePuzzleCoreAPI extends Component<typeof SlidePuzzleCoreAPI> {
 			},
 			{
 				// 탭 전용이다 - 누른 칸에서 떼야 확정된다 (PUZ_00 §8.1 단일 터치)
-				onCellTap: (cell) => { this.session.pressPiece(cell); },
+				// 누르는 **순간** 민다 - 릴리즈(탭 완료)를 기다리면 손가락이 떨어질 때까지의
+				// 시간(대략 0.1초)이 통째로 지연으로 느껴진다. 색 채우기의 onAction 과 같은 원칙이다.
+				onCellDown: (cell) => { this.session.pressPiece(cell); },
 				// 보조 레이아웃의 Reset 버튼 - 판만 되돌리고 남은 시간은 그대로 둔다
 				onReset: () => { this.resetLevel(); },
 			},

@@ -102,6 +102,14 @@ export const BOARD_COLOR_TEXT = boardColor(1, 1, 1);
 /** 선택·드래그 중인 칸의 테두리 */
 export const BOARD_COLOR_HIGHLIGHT = boardColor(0.95, 0.8, 0.25);
 
+/**
+ * 텍스처를 물들이지 않는 값 - 흰색이다.
+ *
+ * 그림은 `multiply` 로 물드므로 흰색을 곱하면 원본 그대로다. 그래서 이 값이 곧
+ * "틴트 없음" 이고, 틴트를 쓰지 않는 퍼즐은 예전과 똑같이 그려진다 (`PuzzleBoardCellView.tint`).
+ */
+export const BOARD_COLOR_NO_TINT = boardColor(1, 1, 1);
+
 //#endregion
 
 //#region Texture
@@ -293,6 +301,16 @@ export type PuzzleBoardCellView = {
 	fill: PuzzleBoardColor,
 	/** 칸에 입힐 텍스처 키. `NO_TEXTURE` 면 색만 칠한다 */
 	texture: PuzzleTextureKey,
+	/**
+	 * 텍스처를 물들일 색 (`multiply`). 기본값 `BOARD_COLOR_NO_TINT`(흰색)는 원본 그대로다.
+	 *
+	 * **`fill` 과 따로 두는 이유**는 둘이 서로 다른 일을 하기 때문이다. `fill` 은 그림이
+	 * 없을 때의 바탕색이라 바탕(테두리·배치 영역)처럼 어두운 값이 들어간다. 그 어두운 색을
+	 * 그대로 그림에 곱하면 그림이 새까매진다. 반면 틴트는 **그림에 입히고 싶은 색**이다 -
+	 * 레이저의 빨강 수신체 그림 한 장이 색깔별 수신체가 되는 식이다. 그래서 색을 입히고
+	 * 싶은 칸만 각 퍼즐이 골라서 준다.
+	 */
+	tint: PuzzleBoardColor,
 	/** 칸 위 글자. 빈 문자열이면 그리지 않는다 */
 	label: string,
 	labelColor: PuzzleBoardColor,
@@ -310,6 +328,7 @@ export function createCellView(): PuzzleBoardCellView {
 		isInteractive: true,
 		fill: BOARD_COLOR_EMPTY,
 		texture: NO_TEXTURE,
+		tint: BOARD_COLOR_NO_TINT,
 		label: '',
 		labelColor: BOARD_COLOR_TEXT,
 		isHighlighted: false,
@@ -324,6 +343,7 @@ export type PuzzleBoardCellPatch = {
 	isInteractive?: boolean,
 	fill?: PuzzleBoardColor,
 	texture?: PuzzleTextureKey,
+	tint?: PuzzleBoardColor,
 	label?: string,
 	labelColor?: PuzzleBoardColor,
 	isHighlighted?: boolean,
@@ -340,6 +360,7 @@ export function applyCellPatch(cell: PuzzleBoardCellView, patch: PuzzleBoardCell
 		&& (patch.isInteractive === undefined || patch.isInteractive === cell.isInteractive)
 		&& (patch.fill === undefined || isSameColor(patch.fill, cell.fill))
 		&& (patch.texture === undefined || patch.texture === cell.texture)
+		&& (patch.tint === undefined || isSameColor(patch.tint, cell.tint))
 		&& (patch.label === undefined || patch.label === cell.label)
 		&& (patch.labelColor === undefined || isSameColor(patch.labelColor, cell.labelColor))
 		&& (patch.isHighlighted === undefined || patch.isHighlighted === cell.isHighlighted)
@@ -352,6 +373,7 @@ export function applyCellPatch(cell: PuzzleBoardCellView, patch: PuzzleBoardCell
 		isInteractive: patch.isInteractive ?? cell.isInteractive,
 		fill: patch.fill ?? cell.fill,
 		texture: patch.texture ?? cell.texture,
+		tint: patch.tint ?? cell.tint,
 		label: patch.label ?? cell.label,
 		labelColor: patch.labelColor ?? cell.labelColor,
 		isHighlighted: patch.isHighlighted ?? cell.isHighlighted,
@@ -373,6 +395,7 @@ export function isSameCellView(left: PuzzleBoardCellView, right: PuzzleBoardCell
 		&& left.accent === right.accent
 		&& left.glyph === right.glyph
 		&& isSameColor(left.fill, right.fill)
+		&& isSameColor(left.tint, right.tint)
 		&& isSameColor(left.labelColor, right.labelColor);
 }
 
@@ -394,6 +417,8 @@ export type PuzzleBoardItemView = {
 	fill: PuzzleBoardColor,
 	/** 슬롯에 입힐 텍스처 키. `NO_TEXTURE` 면 색만 칠한다 */
 	texture: PuzzleTextureKey,
+	/** 그림을 물들일 색. 기본값 `BOARD_COLOR_NO_TINT`(흰색)는 원본 그대로다 (칸과 같은 규칙) */
+	tint: PuzzleBoardColor,
 	label: string,
 	labelColor: PuzzleBoardColor,
 	/** 슬롯 아래 작은 글씨 (남은 개수 등). 빈 문자열이면 그리지 않는다 */
@@ -414,6 +439,7 @@ export function createItemView(): PuzzleBoardItemView {
 		isVisible: false,
 		fill: BOARD_COLOR_EMPTY,
 		texture: NO_TEXTURE,
+		tint: BOARD_COLOR_NO_TINT,
 		label: '',
 		labelColor: BOARD_COLOR_TEXT,
 		caption: '',
@@ -427,6 +453,7 @@ export type PuzzleBoardItemPatch = {
 	isVisible?: boolean,
 	fill?: PuzzleBoardColor,
 	texture?: PuzzleTextureKey,
+	tint?: PuzzleBoardColor,
 	label?: string,
 	labelColor?: PuzzleBoardColor,
 	caption?: string,
@@ -440,6 +467,7 @@ export function applyItemPatch(item: PuzzleBoardItemView, patch: PuzzleBoardItem
 	if ((patch.isVisible === undefined || patch.isVisible === item.isVisible)
 		&& (patch.fill === undefined || isSameColor(patch.fill, item.fill))
 		&& (patch.texture === undefined || patch.texture === item.texture)
+		&& (patch.tint === undefined || isSameColor(patch.tint, item.tint))
 		&& (patch.label === undefined || patch.label === item.label)
 		&& (patch.labelColor === undefined || isSameColor(patch.labelColor, item.labelColor))
 		&& (patch.caption === undefined || patch.caption === item.caption)
@@ -452,6 +480,7 @@ export function applyItemPatch(item: PuzzleBoardItemView, patch: PuzzleBoardItem
 		isVisible: patch.isVisible ?? item.isVisible,
 		fill: patch.fill ?? item.fill,
 		texture: patch.texture ?? item.texture,
+		tint: patch.tint ?? item.tint,
 		label: patch.label ?? item.label,
 		labelColor: patch.labelColor ?? item.labelColor,
 		caption: patch.caption ?? item.caption,
@@ -470,6 +499,7 @@ export function isSameItemView(left: PuzzleBoardItemView, right: PuzzleBoardItem
 		&& left.accent === right.accent
 		&& left.glyph === right.glyph
 		&& isSameColor(left.fill, right.fill)
+		&& isSameColor(left.tint, right.tint)
 		&& isSameColor(left.labelColor, right.labelColor);
 }
 

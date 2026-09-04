@@ -40,7 +40,15 @@
 
 import { Component, PropTypes } from 'horizon/core';
 import { EventPublisher } from 'Utility_Events';
-import { connectPuzzleUpdate, enterPuzzleInteraction, exitPuzzleInteraction } from 'Puzzle_HorizonBridge';
+import {
+	PuzzleGridPoint,
+	PuzzleScreenDragStream,
+	connectPuzzleUpdate,
+	enterPuzzleInteraction,
+	enterPuzzleTouchStream,
+	exitPuzzleInteraction,
+	exitPuzzleTouchStream,
+} from 'Puzzle_HorizonBridge';
 import { EPuzzleId, getCatalogEntry } from 'PuzzleUI_Definitions';
 import { PuzzleHubRegistry, buildPuzzleLevelTable, createPuzzleHandle } from 'PuzzleUI_Registry';
 import {
@@ -49,6 +57,7 @@ import {
 	PUZZLE_BOARD_CELL_OUTSIDE,
 	PuzzleBoardColor,
 	boardColor,
+	BOARD_COLOR_NO_TINT,
 	NO_TEXTURE,
 	PuzzleTextureKey,
 	textureKey,
@@ -128,6 +137,15 @@ const MAX_SEGMENT_STEPS = LASER_FULL_GRID_SIZE * 2;
  */
 /** 플레이어가 옮길 수 있는 크리스탈 */
 const TEXTURE_CRYSTAL: PuzzleTextureKey = textureKey('laser', 'crystal');
+/** 크리스탈 종류별 그림 - 없으면 위의 공통 크리스탈 그림으로 떨어진다 (§4.1) */
+const TEXTURE_CRYSTAL_TRIANGLE: PuzzleTextureKey = textureKey('laser', 'crystalTriangle');
+const TEXTURE_CRYSTAL_OCTAGON: PuzzleTextureKey = textureKey('laser', 'crystalOctagon');
+const TEXTURE_CRYSTAL_CROSS: PuzzleTextureKey = textureKey('laser', 'crystalCross');
+const TEXTURE_CRYSTAL_TEE: PuzzleTextureKey = textureKey('laser', 'crystalTee');
+const TEXTURE_CRYSTAL_FLOWER: PuzzleTextureKey = textureKey('laser', 'crystalFlower');
+/** 발사체 / 수신체 - 예전에는 하나(gimmick)로 묶여 있었다 */
+const TEXTURE_EMITTER: PuzzleTextureKey = textureKey('laser', 'emitter');
+const TEXTURE_RECEIVER: PuzzleTextureKey = textureKey('laser', 'receiver');
 /** 고정 크리스탈 */
 const TEXTURE_FIXED_CRYSTAL: PuzzleTextureKey = textureKey('laser', 'fixedCrystal');
 /** 중계체 */
@@ -157,6 +175,12 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		 * 8개 퍼즐 중 레이저만 띄우기를 켜므로 이 값도 여기서만 조정한다.
 		 */
 		dragLiftCells: { type: PropTypes.Number, default: 0.9 },
+		/**
+		 * 드래그를 **연속 좌표 스트림**으로 받을지 (기본 끔) - 개선 제안 §3 제안 1.
+		 * 규칙과 전제는 `RushHour_CoreAPI.continuousDrag` 주석과 같다 - 스트림 수신은
+		 * 기기 실험(2026-09-04)으로 확인되었다.
+		 */
+		continuousDrag: { type: PropTypes.Boolean, default: false },
 		/** 퀘스트 중 카메라를 고정할지 (기본 끔). 보드가 Custom UI 라 입력에는 필요 없다 */
 		focusCamera: { type: PropTypes.Boolean, default: false },
 		/** `focusCamera` 가 켜졌을 때 카메라가 바라볼 대상 (보통 보드 UI gizmo) */
@@ -169,8 +193,38 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		cameraFov: { type: PropTypes.Number, default: 40 },
 
 		// --- 텍스처 (전부 선택) - 비워 두면 그 요소는 색으로 그려진다 ---
-		/** 플레이어가 옮길 수 있는 크리스탈 */
+		//
+		// 그림을 끼운 요소는 **글자를 그리지 않는다.** 그림 위에 `L`·`E` 같은 글자가 겹치면
+		// 그림이 가려 오히려 알아보기 어렵기 때문이다 (`PuzzleBoardUI_Panel.createLabelVisibility`).
+		// 그림은 오브젝트 색으로 물들므로(틴트) **회색조 한 장이면 색깔별·상태별 오브젝트가
+		// 전부 나온다** - 빨강/파랑 수신체, 꺼져서 어두운 수신체가 같은 그림 한 장이다.
+		//
+		// **방향이 있는 두 그림(삼각형·T자)은 기준 방향으로 그려 넣어야 한다.** 판에서는
+		// 크리스탈의 방향만큼 그림이 시계 방향으로 돌아가는데, 그 회전의 0도가 아래 모양이다.
+		//   삼각형 - 직각 코너가 **좌하단** (글자 `L` 과 같은 모양)
+		//   T자    - 막힌 변이 **위쪽**   (글자 `T` 와 같은 모양)
+		/** 플레이어가 옮길 수 있는 크리스탈 - 아래 종류별 그림이 없을 때의 기본 */
 		crystalTexture: { type: PropTypes.Asset },
+		/**
+		 * 직각 삼각형 거울 (`resources/textures/laser/LaserProp_CrystalTriangle.png`).
+		 * **직각 코너가 좌하단**인 모양으로 그린다 - 나머지 세 방향은 이 그림을 돌려서 쓴다.
+		 */
+		crystalTriangleTexture: { type: PropTypes.Asset },
+		/** 팔각 (`LaserProp_CrystalOctagon.png`) */
+		crystalOctagonTexture: { type: PropTypes.Asset },
+		/** 십자 (`LaserProp_CrystalCross.png`) */
+		crystalCrossTexture: { type: PropTypes.Asset },
+		/**
+		 * T자 (`LaserProp_CrystalTee.png`).
+		 * **막힌 변이 위쪽**인 모양으로 그린다 - 나머지 세 방향은 이 그림을 돌려서 쓴다.
+		 */
+		crystalTeeTexture: { type: PropTypes.Asset },
+		/** 꽃 - 시트에 그림이 없으므로 비워 두면 색으로 그려진다 */
+		crystalFlowerTexture: { type: PropTypes.Asset },
+		/** 발사체 (`LaserProp_Emitter.png`) */
+		emitterTexture: { type: PropTypes.Asset },
+		/** 수신체 (`LaserProp_Receiver.png`) */
+		receiverTexture: { type: PropTypes.Asset },
 		/** 고정 크리스탈 */
 		fixedCrystalTexture: { type: PropTypes.Asset },
 		/** 중계체 */
@@ -185,6 +239,20 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		borderTexture: { type: PropTypes.Asset },
 		/** 격자 뒤에 까는 판 그림 */
 		boardTexture: { type: PropTypes.Asset },
+
+		/**
+		 * 인벤토리 -> 트레이 기록을 콘솔에 남긴다 (디버그) - "크리스탈이 트레이에 없다" 전용.
+		 *
+		 * 이쪽은 **보내는 쪽**의 진단이다. 세션이 크리스탈을 몇 개 들고 있고, 그중 몇 개를
+		 * 슬롯에 적었으며, 프레젠터가 그 기록을 받았는지가 한 줄로 나온다.
+		 * 받는 쪽(트레이가 실제로 그렸는지)은 BoardPanel 의 `showTrayDebug` 가 본다 -
+		 * **둘을 같이 켜면 어디서 끊겼는지가 곧바로 갈린다.**
+		 *
+		 *   보내는 쪽 0개  -> 세션에 크리스탈이 없다 (레벨 데이터/생성기 문제)
+		 *   보내는 쪽 N개인데 받는 쪽 `vis=0` -> 기록이 프레젠터에서 막혔다 (슬롯 수 초과 등)
+		 *   양쪽 다 N개인데 화면에 없다 -> 그리기 문제다 (접힘·크기·색)
+		 */
+		logInventory: { type: PropTypes.Boolean, default: false },
 	};
 
 	public static instance: LaserCoreAPI | undefined = undefined;
@@ -224,6 +292,22 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	private _repaintFilter: Set<number> | undefined = undefined;
 	/** 재사용 버퍼 - 전환마다 Set 을 새로 만들지 않는다 (방법론 §4.4 할당 제로) */
 	private readonly _dirtyCells: Set<number> = new Set<number>();
+
+	/**
+	 * 릴리즈 코얼레싱 (개선 제안 §3 제안 2) - `endDrag()` 가 같은 이벤트 턴 안에서 띄우는
+	 * BEAM_UPDATED 의 리페인트를 건너뛰고 `onDragEnd` 마지막의 **1회**로 합친다.
+	 * 세션이 `lastTrace` 를 이미 갱신해 두므로 그 1회가 같은 광선을 그린다.
+	 * (릴리즈의 더티 필터(제안 3)는 레이저에 적용하지 않는다 - 광선 재계산은 어느 칸이든
+	 * 바꿀 수 있어 영향 범위를 미리 알 수 없다.)
+	 */
+	private _isReleaseCoalescing: boolean = false;
+
+	/**
+	 * 연속 좌표 드래그 스트림 (제안 1) - `continuousDrag` prop 을 켰을 때만 만든다.
+	 * 잡기(칸 누름·트레이 슬롯)는 그대로 두고, 스트림이 이동을 배달하기 시작하면
+	 * (`isDriving`) 칸 단위 move/up 은 무시된다 - `PuzzleScreenDragStream` 머리말 참고.
+	 */
+	private _dragStream: PuzzleScreenDragStream | undefined = undefined;
 
 	private _isInteractionActive: boolean = false;
 
@@ -271,6 +355,18 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		this.createPresenter();
 		this.subscribeToSessionEvents();
 
+		if (this.props.continuousDrag) {
+			// 제안 1 - 이동·뗌을 Focused Interaction 스트림으로 받는다 (잡기는 누름 그대로)
+			this._dragStream = new PuzzleScreenDragStream(
+				this, LASER_FULL_GRID_SIZE, BOARD_COL_COUNT, {
+					onStreamMove: (point) => this.onStreamDragMove(point),
+					onStreamEnd: (point) => this.onStreamDragEnd(point),
+				});
+			console.log('[LaserCoreAPI] Continuous drag stream is enabled. '
+				+ 'Move/release come from Focused Interaction input when the stream delivers; '
+				+ 'cell-based input stays as the fallback.');
+		}
+
 		// 이것을 빠뜨리면 제한 시간이 흐르지 않는다
 		connectPuzzleUpdate(this, (deltaSeconds) => this.session.update(deltaSeconds));
 
@@ -306,6 +402,13 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	private registerTextures(): void {
 		const count = PuzzleTextureLibrary.instance.registerAll([
 			{ key: TEXTURE_CRYSTAL, asset: this.props.crystalTexture },
+			{ key: TEXTURE_CRYSTAL_TRIANGLE, asset: this.props.crystalTriangleTexture },
+			{ key: TEXTURE_CRYSTAL_OCTAGON, asset: this.props.crystalOctagonTexture },
+			{ key: TEXTURE_CRYSTAL_CROSS, asset: this.props.crystalCrossTexture },
+			{ key: TEXTURE_CRYSTAL_TEE, asset: this.props.crystalTeeTexture },
+			{ key: TEXTURE_CRYSTAL_FLOWER, asset: this.props.crystalFlowerTexture },
+			{ key: TEXTURE_EMITTER, asset: this.props.emitterTexture },
+			{ key: TEXTURE_RECEIVER, asset: this.props.receiverTexture },
 			{ key: TEXTURE_FIXED_CRYSTAL, asset: this.props.fixedCrystalTexture },
 			{ key: TEXTURE_RELAY, asset: this.props.relayTexture },
 			{ key: TEXTURE_SKULL, asset: this.props.skullTexture },
@@ -316,6 +419,13 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		]);
 		console.log(`[LaserCoreAPI] Registered ${count} textures. `
 			+ 'Elements without one are drawn with a flat colour.');
+		if (count === 0) {
+			// 텍스처를 끼웠다고 생각했는데 0 이면 prop 이 비어 있거나 애셋이 Texture 가 아니다.
+			// 화면에서는 색으로만 그려져 원인을 찾기 어려우므로 여기서 짚어 준다.
+			console.warn('[LaserCoreAPI] No textures were registered. '
+				+ 'If you assigned assets in the editor, check that each asset type is Texture '
+				+ 'and that it is plugged into the matching *Texture prop of this component.');
+		}
 	}
 
 	private createPresenter(): void {
@@ -371,6 +481,8 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		this._dragCol = this._dragSourceCol;
 		// 집자마자는 제자리이므로 언제나 놓을 수 있다
 		this._isDropValid = true;
+		// 제안 1 - 잡기에 성공했다. 이 드래그의 이동·뗌 스트림을 받기 시작한다
+		this._dragStream?.notifyDragBegan();
 		this.applyBoardVisuals();
 	}
 
@@ -393,6 +505,8 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		this._dragRow = undefined;
 		this._dragCol = undefined;
 		this._isDropValid = false;
+		// 제안 1 - 트레이에서 집은 드래그도 이동·뗌은 같은 스트림 경로를 탄다
+		this._dragStream?.notifyDragBegan();
 		this.applyBoardVisuals();
 	}
 
@@ -403,6 +517,10 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	 * 그것을 그대로 테두리 색으로 옮겨, 손을 떼기 전에 결과를 알 수 있게 한다.
 	 */
 	private onDragMove(cell: number): void {
+		// 스트림이 이 드래그를 넘겨받았다 - 칸 단위 좌표를 겹쳐 넣지 않는다 (제안 1 폴백 규칙)
+		if (this._dragStream?.isDriving === true) {
+			return;
+		}
 		// 칸 사이를 스쳐 지나가는 순간의 "판 밖" 은 무시한다.
 		// 그대로 반영하면 끌고 있던 크리스탈이 한 프레임 사라졌다 나타나 깜빡인다.
 		// 진짜로 판 밖에 놓았는지는 손을 뗄 때(`onDragEnd`) 뗀 칸으로 판정한다.
@@ -413,6 +531,30 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	}
 
 	/**
+	 * 스트림의 이동 (제안 1) - 연속 전체 그리드 좌표가 입력 이벤트 해상도로 온다.
+	 * 배치 로컬(0..4) = 전체 그리드(1..5) - 1 이라 변환은 뺄셈 하나다.
+	 * 배치 영역 밖 좌표도 그대로 넘긴다 - 컨트롤러가 반올림해 판 밖 여부를 판정한다.
+	 */
+	private onStreamDragMove(point: PuzzleGridPoint): void {
+		if (this._dragCrystalId === undefined) {
+			return;
+		}
+		this.trackDragToLocal(point.row - 1, point.col - 1);
+	}
+
+	/** 스트림의 뗌 (제안 1) - `inputEnded` 는 유실되지 않으므로 릴리즈 유실 문제가 사라진다 */
+	private onStreamDragEnd(point: PuzzleGridPoint): void {
+		if (this._dragCrystalId === undefined) {
+			return;
+		}
+		// 좌표를 만들 수 없었던 뗌(NaN)은 마지막 이동이 반영한 자리에 그대로 확정한다
+		if (isNaN(point.row) === false && isNaN(point.col) === false) {
+			this.trackDragToLocal(point.row - 1, point.col - 1);
+		}
+		this.finalizeDrag();
+	}
+
+	/**
 	 * 손가락이 올라간 칸을 미리보기에 반영한다. 실제로 바뀐 경우에만 다시 그린다.
 	 *
 	 * **바뀌지 않았는데 다시 그리면 안 된다.** `applyBoardVisuals()` 는 바탕 49칸을 다시
@@ -420,7 +562,17 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	 * 손가락이 한 칸 안에서 움직일 때마다 그것을 돌리면 조작이 무겁게 느껴진다.
 	 */
 	private trackDragTo(cell: number): void {
-		const visual = this.session.updateDrag(toLocalRow(cell), toLocalCol(cell));
+		this.trackDragToLocal(toLocalRow(cell), toLocalCol(cell));
+	}
+
+	/**
+	 * 배치 로컬 좌표(연속)를 미리보기에 반영하는 본체.
+	 *
+	 * 칸 단위 경로(`trackDragTo`)와 스트림 경로(`onStreamDragMove`, 제안 1)가 여기서
+	 * 합류한다 - 컨트롤러가 연속 좌표를 받아 반올림·판정하므로 로직은 하나면 된다.
+	 */
+	private trackDragToLocal(localRow: number, localCol: number): void {
+		const visual = this.session.updateDrag(localRow, localCol);
 		if (this._dragCrystalId === undefined) {
 			return;
 		}
@@ -469,12 +621,32 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	 *
 	 * 뗀 칸을 마지막으로 한 번 더 반영한 뒤 확정한다. `onCellMove` 없이 곧바로 떼는
 	 * 짧은 탭에서도 목적지가 정확해진다.
+	 *
+	 * 리페인트는 **이 함수 마지막의 1회뿐이다** (제안 2). `endDrag()` 안의 광선 재계산이
+	 * 띄우는 BEAM_UPDATED 구독은 코얼레싱 플래그를 보고 건너뛰고, 아래 1회가
+	 * `session.lastTrace` (막 갱신된 광선)로 그린다. 배치가 거절되어 광선이 그대로인
+	 * 경우에도 이 1회가 드래그 강조를 지운다.
 	 */
 	private onDragEnd(cell: number): void {
+		// 스트림이 이 드래그를 넘겨받았다 - 뗌도 스트림(`onStreamDragEnd`)이 확정한다.
+		// 여기서 함께 확정하면 endDrag 가 두 번 돌고 릴리즈 리페인트도 두 번이 된다 (제안 1).
+		if (this._dragStream?.isDriving === true) {
+			return;
+		}
 		this.trackDragTo(cell);
+		this.finalizeDrag();
+	}
+
+	/**
+	 * 릴리즈 확정의 본체 - 칸 단위 경로(`onDragEnd`)와 스트림 경로(`onStreamDragEnd`)가
+	 * 합류한다. 마지막 좌표 반영은 각 경로가 이미 끝냈다.
+	 */
+	private finalizeDrag(): void {
+		this._isReleaseCoalescing = true;
 		this.session.endDrag();
+		this._isReleaseCoalescing = false;
+
 		this.clearDragState();
-		// 배치가 거절되어 광선 재계산 이벤트가 오지 않는 경우에도 강조는 지워져야 한다
 		this.applyBoardVisuals();
 	}
 
@@ -502,16 +674,24 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	//#region Focused interaction lifecycle (선택 - focusCamera 를 켰을 때만)
 
 	private enterInteraction(): void {
-		if (this.props.focusCamera === false || this._isInteractionActive) {
+		if (this._isInteractionActive) {
 			return;
 		}
-		this._isInteractionActive = true;
-		enterPuzzleInteraction(this, {
-			cameraObject: this.props.cameraObject ?? undefined,
-			boardCentre: this.props.cameraDistance > 0 ? (this.props.boardCentre ?? undefined) : undefined,
-			distance: this.props.cameraDistance,
-			fov: this.props.cameraFov > 0 ? this.props.cameraFov : undefined,
-		});
+		if (this.props.focusCamera) {
+			this._isInteractionActive = true;
+			enterPuzzleInteraction(this, {
+				cameraObject: this.props.cameraObject ?? undefined,
+				boardCentre: this.props.cameraDistance > 0 ? (this.props.boardCentre ?? undefined) : undefined,
+				distance: this.props.cameraDistance,
+				fov: this.props.cameraFov > 0 ? this.props.cameraFov : undefined,
+			});
+			return;
+		}
+		if (this.props.continuousDrag) {
+			// 제안 1 - 스트림은 Focused Interaction 모드에서만 흐른다. 카메라는 그대로 둔다.
+			this._isInteractionActive = true;
+			enterPuzzleTouchStream(this);
+		}
 	}
 
 	private releaseInteraction(): void {
@@ -519,7 +699,12 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 			return;
 		}
 		this._isInteractionActive = false;
-		exitPuzzleInteraction(this);
+		if (this.props.focusCamera) {
+			exitPuzzleInteraction(this);
+		}
+		else {
+			exitPuzzleTouchStream(this);
+		}
 	}
 
 	//#endregion
@@ -612,9 +797,9 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		this.events.PLACEMENT_REJECTED.subscribe((payload) => {
 			console.log(`[LaserCoreAPI] Placement rejected for ${payload.crystalId}: ${payload.reason}`);
 		});
-		this.events.SKULL_HIT.subscribe(() => {
-			console.log('[LaserCoreAPI] Beam hit a skull. All receivers are in Fault.');
-		});
+		// **해골 명중은 로그로 남기지 않는다.** 광선은 드래그 한 칸마다 다시 계산되므로
+		// 해골 위를 지나는 배치에서는 매 이동마다 로그가 나온다 - 그 빈도의 `console.log` 가
+		// 드래그를 끊기게 만든다. Fault 상태는 수신체 색이 이미 알려 준다.
 
 		this.events.QUEST_CLEAR.subscribe(this.onQuestEnd.bind(this));
 		this.events.QUEST_FAILED.subscribe(this.onQuestEnd.bind(this));
@@ -639,6 +824,10 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	}
 
 	private onBeamUpdated(trace: LaserTraceResult): void {
+		// 릴리즈 턴에는 onDragEnd 마지막의 1회로 합친다 (제안 2)
+		if (this._isReleaseCoalescing) {
+			return;
+		}
 		this.applyBoardVisuals(trace);
 	}
 
@@ -708,7 +897,8 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		// 배치 로컬(0..4) -> 전체 그리드(1..5)
 		this.setCell(row + 1, col + 1, {
 			fill: COLOR_CRYSTAL,
-			texture: TEXTURE_CRYSTAL,
+			tint: COLOR_CRYSTAL,
+			texture: getCrystalTexture(crystal),
 			label: getCrystalLabel(crystal),
 			labelColor: COLOR_LABEL_DARK,
 			isHighlighted: false,
@@ -766,7 +956,9 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 				// 더티 필터가 걸려 있으면 그 칸만 기록한다 - 패치 객체를 만들기 전에 거른다 (§4.4)
 				if (this._repaintFilter === undefined
 					|| this._repaintFilter.has(row * BOARD_COL_COUNT + col)) {
-					this.setCell(row, col, { fill: tint, label: '', isHighlighted: false });
+					// 판 그림이 깔려 있으면 색만 바꿔서는 광선이 그림에 가려 보이지 않는다.
+					// 그림째 광선 색으로 물들여야 지나간 자리가 드러난다.
+					this.setCell(row, col, { fill: tint, tint: tint, label: '', isHighlighted: false });
 				}
 				if (row === segment.to.row && col === segment.to.col) {
 					break;
@@ -780,9 +972,16 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 	private applyGimmickVisuals(trace: LaserTraceResult | undefined): void {
 		for (const gimmick of this.session.board?.gimmicks ?? []) {
 			const state = trace?.objectStates.get(gimmick.id);
+			// 오브젝트의 색은 그림에도 그대로 입힌다 - 그림 한 장이 색깔별·상태별
+			// 오브젝트가 된다 (빨강/파랑 수신체, 꺼진 수신체는 어둡게)
+			const color = getGimmickColor(gimmick.type, gimmick.colors, state);
 			this.setCell(gimmick.row, gimmick.col, {
-				fill: getGimmickColor(gimmick.type, gimmick.colors, state),
-				texture: getGimmickTexture(gimmick.type),
+				fill: color,
+				tint: color,
+				// 고정 크리스탈 기믹은 크리스탈 그림을 쓴다 - 동작이 크리스탈과 같기 때문이다 (§4.3)
+				texture: gimmick.crystal === undefined
+					? getGimmickTexture(gimmick.type)
+					: getCrystalTexture(gimmick.crystal),
 				label: getGimmickLabel(gimmick.type, gimmick.crystal),
 				labelColor: gimmick.type === EGimmickType.RELAY ? COLOR_LABEL_DARK : COLOR_LABEL,
 				// 인터랙션 규격: 발사체·수신체·중계체 등 판에서 생성된 오브젝트는 정적이다
@@ -801,9 +1000,13 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 			// 보드는 손을 뗄 때까지 크리스탈을 그 자리에 두므로, 이렇게 하지 않으면
 			// 크리스탈이 원래 자리와 손가락 아래에 둘로 보인다 (§3 3.3).
 			const isSource = placed.id === this._dragCrystalId;
+			const color = placed.isFixed ? COLOR_FIXED_CRYSTAL : COLOR_CRYSTAL;
 			this.setCell(placed.row + 1, placed.col + 1, {
-				fill: placed.isFixed ? COLOR_FIXED_CRYSTAL : COLOR_CRYSTAL,
-				texture: placed.isFixed ? TEXTURE_FIXED_CRYSTAL : TEXTURE_CRYSTAL,
+				fill: color,
+				// 고정 크리스탈은 어두운 색으로 물들어 "옮길 수 없다" 가 그림에서도 보인다
+				tint: color,
+				// 고정 크리스탈은 전용 그림이 있으면 그것을, 없으면 종류별 그림을 쓴다
+				texture: placed.isFixed ? getFixedCrystalTexture(placed) : getCrystalTexture(placed),
 				label: isSource ? '' : getCrystalLabel(placed),
 				labelColor: COLOR_LABEL_DARK,
 				// 인터랙션 규격: 트레이에서 스폰된(옮길 수 있는) 크리스탈만 만질 수 있다.
@@ -818,6 +1021,8 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 
 	private applyInventoryVisuals(): void {
 		const inventory = this.session.board?.inventory ?? [];
+		// 진단(`logInventory`)이 읽는 값 - 슬롯에 적은 크리스탈을 그대로 모아 둔다
+		const written: string[] = [];
 		for (let slot = 0; slot < INVENTORY_SLOT_COUNT; slot++) {
 			const crystal = inventory[slot];
 
@@ -827,6 +1032,7 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 					isVisible: false,
 					fill: COLOR_INVENTORY_EMPTY,
 					texture: NO_TEXTURE,
+					tint: BOARD_COLOR_NO_TINT,
 					label: '',
 					caption: '',
 					accent: EBoardCellAccent.NONE,
@@ -840,7 +1046,10 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 			this._presenter.setItem(slot, {
 				isVisible: true,
 				fill: COLOR_CRYSTAL,
-				texture: TEXTURE_CRYSTAL,
+				// 판 위와 같은 색으로 그림을 물들인다
+				tint: COLOR_CRYSTAL,
+				// 판 위와 같은 그림을 트레이에도 쓴다 - 집기 전에 무엇인지 알 수 있어야 한다
+				texture: getCrystalTexture(crystal),
 				label: getCrystalLabel(crystal),
 				labelColor: COLOR_LABEL_DARK,
 				caption: '',
@@ -849,6 +1058,34 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 				// 판 위와 같은 무늬를 트레이에도 그린다 - 집기 전에 방향을 고를 수 있게
 				glyph: getCrystalGlyph(crystal),
 			});
+			if (this.props.logInventory) {
+				const texture = getCrystalTexture(crystal);
+				written.push(`[${slot}]=${crystal.type}`
+					+ ` tex=${texture === NO_TEXTURE ? 'none' : texture}`
+					+ `${PuzzleTextureLibrary.instance.has(texture) ? '' : '(unregistered)'}`);
+			}
+		}
+		this.logInventoryState(inventory.length, written);
+	}
+
+	/**
+	 * 인벤토리를 트레이에 적은 결과를 한 줄로 남긴다 (`logInventory`).
+	 *
+	 * 세션이 든 개수와 슬롯에 적은 개수를 **나란히** 찍는 것이 요점이다. 둘이 다르면
+	 * 슬롯 수(`INVENTORY_SLOT_COUNT`)를 넘긴 것이고, 둘 다 0 이면 애초에 크리스탈이
+	 * 생성되지 않은 것이다. 화면이 아니라 콘솔로 나가는 값이라 영어다.
+	 */
+	private logInventoryState(inventoryCount: number, written: string[]): void {
+		if (this.props.logInventory === false) {
+			return;
+		}
+		console.log(`[LaserCoreAPI] Inventory -> tray: session holds ${inventoryCount} crystals, `
+			+ `wrote ${written.length} of ${INVENTORY_SLOT_COUNT} slots`
+			+ `${written.length === 0 ? '.' : `: ${written.join(' ')}`}`);
+		if (inventoryCount === 0) {
+			console.warn('[LaserCoreAPI] The session has no crystals to place in the tray. '
+				+ 'The level data or the generator produced an empty inventory, '
+				+ 'so nothing can be drawn there.');
 		}
 	}
 
@@ -857,6 +1094,11 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 		fill: PuzzleBoardColor,
 		/** 생략하면 바탕에서 칠해 둔 그림이 그대로 남는다 (광선 구간이 그 경우다) */
 		texture?: PuzzleTextureKey,
+		/**
+		 * 그림에 입힐 색. **생략하면 물들이지 않는다** - 앞 프레임에서 물든 칸이
+		 * 그대로 남지 않도록 무늬(`glyph`)와 같은 규칙으로 매번 지운다.
+		 */
+		tint?: PuzzleBoardColor,
 		label: string,
 		labelColor?: PuzzleBoardColor,
 		/** 생략하면 바탕에서 정한 값이 그대로 남는다 (광선 구간이 그 경우다) */
@@ -877,6 +1119,7 @@ export class LaserCoreAPI extends Component<typeof LaserCoreAPI> {
 			isVisible: true,
 			fill: patch.fill,
 			texture: patch.texture,
+			tint: patch.tint ?? BOARD_COLOR_NO_TINT,
 			label: patch.label,
 			labelColor: patch.labelColor ?? COLOR_LABEL,
 			isInteractive: patch.isInteractive,
@@ -942,15 +1185,57 @@ function toneColor(color: PuzzleBoardColor, scale: number): PuzzleBoardColor {
 /**
  * 기믹의 그림.
  *
- * 발사체·수신체는 같은 그림을 쓰고 색으로 갈린다 (§5.1 - 둘 다 테두리에만 서고,
- * 켜짐/꺼짐은 색이 알린다). 중계체와 해골만 따로 둔다.
+ * 발사체·수신체·중계체·해골이 각자 그림을 갖는다. 끼우지 않은 것은 공통 그림
+ * (`gimmickTexture`)으로, 그것도 없으면 색으로 떨어진다. 켜짐/꺼짐은 여전히 색이 알린다.
  */
+/**
+ * 크리스탈 종류에 맞는 그림.
+ *
+ * 종류별 그림을 끼우지 않았으면 공통 크리스탈 그림으로 떨어지고, 그것마저 없으면 색으로
+ * 그려진다. 방향(무늬 테두리·글자 회전)은 그림과 별개로 계속 얹히므로, 같은 T자라도
+ * 어느 변이 막혔는지는 그대로 읽힌다 (`EBoardCellGlyph`).
+ */
+/**
+ * 원하는 그림이 등록돼 있으면 그것을, 없으면 대체 그림을 쓴다.
+ *
+ * 그림 키는 **등록 여부와 무관하게 만들어지므로**, 여기서 라이브러리를 확인하지 않으면
+ * "에셋을 끼우지 않은 키" 가 그대로 칸에 실려 색으로만 그려진다. 문서가 약속한
+ * "종류별 그림이 없으면 공통 그림으로 떨어진다" 는 이 확인이 있어야 성립한다.
+ * (레이저는 텍스처 등록이 `constructSystems()` 에서 한 번 끝난 뒤에만 칠하므로
+ * 등록 시점 문제는 없다.)
+ */
+function pickTexture(preferred: PuzzleTextureKey, fallback: PuzzleTextureKey): PuzzleTextureKey {
+	return PuzzleTextureLibrary.instance.has(preferred) ? preferred : fallback;
+}
+
+function getCrystalTexture(crystal: LaserCrystal): PuzzleTextureKey {
+	switch (crystal.type) {
+		case ECrystalType.TRIANGLE: return pickTexture(TEXTURE_CRYSTAL_TRIANGLE, TEXTURE_CRYSTAL);
+		case ECrystalType.OCTAGON: return pickTexture(TEXTURE_CRYSTAL_OCTAGON, TEXTURE_CRYSTAL);
+		case ECrystalType.CROSS: return pickTexture(TEXTURE_CRYSTAL_CROSS, TEXTURE_CRYSTAL);
+		case ECrystalType.TEE: return pickTexture(TEXTURE_CRYSTAL_TEE, TEXTURE_CRYSTAL);
+		case ECrystalType.FLOWER: return pickTexture(TEXTURE_CRYSTAL_FLOWER, TEXTURE_CRYSTAL);
+		default: return TEXTURE_CRYSTAL;
+	}
+}
+
+/** 고정 크리스탈 - 전용 그림이 없으면 종류별 그림으로 떨어진다 (§4.3) */
+function getFixedCrystalTexture(crystal: LaserCrystal): PuzzleTextureKey {
+	return pickTexture(TEXTURE_FIXED_CRYSTAL, getCrystalTexture(crystal));
+}
+
 function getGimmickTexture(type: EGimmickType): PuzzleTextureKey {
 	if (type === EGimmickType.RELAY) {
-		return TEXTURE_RELAY;
+		return pickTexture(TEXTURE_RELAY, TEXTURE_GIMMICK);
 	}
 	if (type === EGimmickType.SKULL) {
-		return TEXTURE_SKULL;
+		return pickTexture(TEXTURE_SKULL, TEXTURE_GIMMICK);
+	}
+	if (type === EGimmickType.EMITTER) {
+		return pickTexture(TEXTURE_EMITTER, TEXTURE_GIMMICK);
+	}
+	if (type === EGimmickType.RECEIVER) {
+		return pickTexture(TEXTURE_RECEIVER, TEXTURE_GIMMICK);
 	}
 	return TEXTURE_GIMMICK;
 }

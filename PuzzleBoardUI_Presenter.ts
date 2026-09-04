@@ -45,6 +45,7 @@
  */
 
 import { EventPublisher } from 'Utility_Events';
+import { PuzzleScreenGridGeometry } from 'PuzzleUI_RelativeLayout';
 import {
 	PUZZLE_BOARD_CELL_OUTSIDE,
 	PUZZLE_BOARD_INTRO_TEXT,
@@ -170,10 +171,18 @@ export class PuzzleBoardPresenter {
 	private _lastInsideCell: number = PUZZLE_BOARD_CELL_OUTSIDE;
 
 	private _intro: PuzzleBoardIntroView = { isVisible: false, text: PUZZLE_BOARD_INTRO_TEXT };
+	/**
+	 * 시작 배너가 입력을 잠그고 있는지.
+	 *
+	 * 배너 표시(`_intro.isVisible`)와 **따로** 든다 - 배너가 페이드 아웃되는 동안에는
+	 * 아직 떠 있지만 입력은 이미 열려 있어야 하기 때문이다 (`unlockIntroInput()`).
+	 */
+	private _isIntroInputLocked: boolean = false;
 
 	/** 마지막으로 알린 누름 표시. 같은 값을 두 번 알리지 않기 위해 들고 있는다 */
 	private _pressCell: number = PUZZLE_BOARD_CELL_OUTSIDE;
 	private _pressItem: number = PUZZLE_BOARD_CELL_OUTSIDE;
+
 
 	constructor(spec: PuzzleBoardLayoutSpec, handlers: PuzzleBoardInputHandlers = {}) {
 		this._handlers = handlers;
@@ -333,21 +342,39 @@ export class PuzzleBoardPresenter {
 	//#region Intro (레벨 시작 배너)
 
 	/**
-	 * 시작 배너를 띄운다. 떠 있는 동안 보조 레이아웃은 그리지 않는다.
+	 * 시작 배너를 띄운다. 떠 있는 동안 보조 레이아웃은 그리지 않고,
+	 * **보드 입력도 받지 않는다** - 배너가 완전히 사라져야(`endIntro()`) 조작이 열린다.
+	 * 그래서 CoreAPI 가 레벨 로드에서 `setInputEnabled(true)` 를 먼저 불러도
+	 * 배너가 떠 있는 동안에는 칸을 눌러도 아무 일이 일어나지 않는다.
 	 *
 	 * **얼마나 떠 있을지는 여기서 정하지 않는다.** 순수 계층에는 타이머가 없으므로
-	 * 패널이 `introSeconds` 뒤에 `endIntro()` 를 부른다.
+	 * 패널이 표시·페이드 아웃을 마친 뒤 `endIntro()` 를 부른다.
 	 */
 	public beginIntro(text: string = PUZZLE_BOARD_INTRO_TEXT): void {
 		if (this._intro.isVisible && this._intro.text === text) {
 			return;
 		}
+		// 배너가 뜨면 입력이 얼어붙으므로, 열려 있던 누름을 그대로 두면 영영 안 놓인다
+		this.cancelPress();
+		this._isIntroInputLocked = true;
 		this._intro = { isVisible: true, text: text };
 		this.INTRO_CHANGED.publish(this.getIntro());
 	}
 
-	/** 배너를 내린다 - 이 시점에 보조 레이아웃이 나타난다 */
+	/**
+	 * 배너는 아직 떠 있지만 **보드 입력은 먼저 연다** - 패널이 페이드 아웃을 시작할 때 부른다.
+	 *
+	 * 예전에는 배너가 완전히 잦아든 뒤에야 입력이 열려, 레벨이 시작되고 약 1초 동안
+	 * 첫 터치가 그냥 삼켜졌다. 배너는 보조 레이아웃 자리에 뜨므로 판을 가리지 않는다 -
+	 * 잦아드는 배너를 기다리게 할 이유가 없다. 배너가 **완전히 보이는 동안**만 잠근다.
+	 */
+	public unlockIntroInput(): void {
+		this._isIntroInputLocked = false;
+	}
+
+	/** 배너를 내린다 - 이 시점에 보조 레이아웃이 나타난다. 입력은 보통 페이드 시작에 먼저 열린다 */
 	public endIntro(): void {
+		this._isIntroInputLocked = false;
 		if (this._intro.isVisible === false) {
 			return;
 		}
@@ -370,8 +397,17 @@ export class PuzzleBoardPresenter {
 		}
 	}
 
+	/**
+	 * 지금 새 누름을 받을 수 있는지 - 입력 스위치가 켜져 있고, 시작 배너의 잠금이 풀린 뒤여야 한다.
+	 * 잠금은 배너가 **완전히 보이는 동안**만이다 - 페이드가 시작되면 패널이 `unlockIntroInput()` 으로
+	 * 먼저 연다 (배너가 다 잦아들 때까지 기다리면 첫 터치가 삼켜져 반응이 느리게 느껴진다).
+	 */
+	private canAcceptInput(): boolean {
+		return this._isInputEnabled && this._isIntroInputLocked === false;
+	}
+
 	public pointerDown(cell: number): void {
-		if (this._isInputEnabled === false) {
+		if (this.canAcceptInput() === false) {
 			return;
 		}
 		if (this._press !== undefined) {
@@ -407,7 +443,7 @@ export class PuzzleBoardPresenter {
 	 * 판으로 끌고 가면 그때부터는 칸에서 시작한 누름과 완전히 같은 경로다.
 	 */
 	public itemDown(item: number): void {
-		if (this._isInputEnabled === false) {
+		if (this.canAcceptInput() === false) {
 			return;
 		}
 		if (this._press !== undefined) {
@@ -434,7 +470,7 @@ export class PuzzleBoardPresenter {
 	 * 되돌아갈 판이 사라지므로 먼저 마감한다.
 	 */
 	public requestReset(): boolean {
-		if (this._isInputEnabled === false || this._handlers.onReset === undefined) {
+		if (this.canAcceptInput() === false || this._handlers.onReset === undefined) {
 			return false;
 		}
 		this.cancelPress();
@@ -448,7 +484,7 @@ export class PuzzleBoardPresenter {
 	 * 액션 버튼은 격자 누름과 영역이 겹치지 않아 서로 방해할 일이 없다.
 	 */
 	public requestAction(): boolean {
-		if (this._isInputEnabled === false || this._handlers.onAction === undefined) {
+		if (this.canAcceptInput() === false || this._handlers.onAction === undefined) {
 			return false;
 		}
 		this._handlers.onAction();
@@ -657,8 +693,27 @@ export class PuzzleBoardStage {
 
 	private _current: PuzzleBoardPresenter | undefined = undefined;
 
+	/**
+	 * 패널이 확정한 화면 배치 - 드래그 스트림(제안 1)의 화면 -> 격자 변환 근거.
+	 *
+	 * 패널(`PuzzleBoardUI_Panel.resolveLayout`)이 자기 prop 으로 확정한 상대 배치와 화면
+	 * 비율을 여기 실어 두면, `Puzzle_HorizonBridge.PuzzleScreenDragStream` 이 꺼내 쓴다.
+	 * CoreAPI 가 패널의 prop 을 다시 읽어 계산하면 에디터에서 패널만 바꿨을 때 어긋난다 -
+	 * **패널이 실제로 그린 값 하나만** 진실이어야 한다. 패널이 없으면 undefined 로 남고,
+	 * 그동안 스트림은 변환을 포기해 칸 단위 폴백만 동작한다.
+	 */
+	private _screenGeometry: PuzzleScreenGridGeometry | undefined = undefined;
+
 	public get current(): PuzzleBoardPresenter | undefined {
 		return this._current;
+	}
+
+	public setScreenGeometry(geometry: PuzzleScreenGridGeometry): void {
+		this._screenGeometry = geometry;
+	}
+
+	public get screenGeometry(): PuzzleScreenGridGeometry | undefined {
+		return this._screenGeometry;
 	}
 
 	public mount(presenter: PuzzleBoardPresenter): void {

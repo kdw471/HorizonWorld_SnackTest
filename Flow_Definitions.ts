@@ -112,6 +112,58 @@ export type FlowNode = {
 	role?: ENodeRole,
 }
 
+/**
+ * 색 쌍에 붙이는 글자 - 두 전구가 **같은 글자**를 달고 있으면 한눈에 짝이 보인다.
+ *
+ * 색만으로는 짝을 찾기 어렵다는 신고를 받았다 (worker/NextJob.md 1번). 색약이거나 화면이
+ * 작을수록 빨강과 주황, 파랑과 남색이 붙어 보이는데 글자는 그런 조건에서도 읽힌다.
+ */
+export const FLOW_PAIR_LABELS: readonly string[] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+
+/** 출발 지점 표시 - 글자 뒤에 붙는다 (`A*`) */
+export const FLOW_START_MARK = '*';
+
+/**
+ * 판에 쓰인 색에 글자를 붙인다. **판에 나온 순서**로 A, B, C ... 를 준다.
+ *
+ * 색 상수 순서(`ALL_FLOW_COLORS`)를 쓰지 않는 이유는, 판이 빨강과 파랑만 쓰는 경우에도
+ * 글자가 A·B 로 이어지게 하기 위해서다. 색이 글자 수보다 많으면 남는 색은 글자가 없다
+ * (둘 다 8종이라 실제로는 일어나지 않는다).
+ */
+export function assignFlowPairLabels(nodes: readonly FlowNode[]): Map<string, string> {
+	const labels: Map<string, string> = new Map();
+	for (const node of nodes) {
+		if (node.kind !== ENodeKind.MAIN || node.color === undefined) {
+			continue;
+		}
+		const key = node.color as string;
+		if (labels.has(key)) {
+			continue;
+		}
+		const next = FLOW_PAIR_LABELS[labels.size];
+		if (next === undefined) {
+			continue;
+		}
+		labels.set(key, next);
+	}
+	return labels;
+}
+
+/**
+ * 전구에 얹을 글자. 출발 지점에는 표시가 하나 더 붙는다.
+ * 메인이 아니거나 글자가 없는 색이면 빈 문자열 - 선이 지나간 칸은 글자를 달지 않는다.
+ */
+export function getFlowNodeLabel(node: FlowNode, labels: Map<string, string>): string {
+	if (node.kind !== ENodeKind.MAIN || node.color === undefined) {
+		return '';
+	}
+	const letter = labels.get(node.color as string) ?? '';
+	if (letter === '') {
+		return '';
+	}
+	return node.role === ENodeRole.START ? `${letter}${FLOW_START_MARK}` : letter;
+}
+
 /** 한 판의 배치 정보 */
 export type FlowLevel = {
 	puzzleId: string,

@@ -37,8 +37,9 @@ import { PuzzleHubModel } from 'PuzzleUI_Model';
 import {
 	AUX_AREA_FLEX,
 	BOARD_AREA_FLEX,
+	TRAY_HEIGHT_USAGE,
 	TRAY_MAX_VISIBLE_SLOTS,
-	TRAY_MIN_VISIBLE_SLOTS,
+	TRAY_WIDTH_USAGE,
 	auxAreaFraction,
 	boardAreaFraction,
 	boardSquareFraction,
@@ -46,6 +47,7 @@ import {
 	computeGridBox,
 	percentText,
 	resolveRelativeLayout,
+	trayGrid,
 	trayPageCount,
 	traySlotsPerPage,
 } from 'PuzzleUI_RelativeLayout';
@@ -65,6 +67,7 @@ import {
 	computeTrayPageSize,
 	fitBoardAreaToCanvas,
 	fitBoardAreaToProfile,
+	canvasPixelScale,
 	fitFontSize,
 	fitSquareSide,
 	getCatalogColumns,
@@ -822,14 +825,14 @@ function testRelativeLayout(recorder: TestRecorder): void {
 		cellFraction(layout, phoneAspect, 9, 9).ofWidth >= 0.10,
 		`${cellFraction(layout, phoneAspect, 9, 9).ofWidth}`);
 
-	// 트레이 페이지: 픽셀 없이 화면 비율만으로 몇 개가 들어가는지 나온다
+	// 트레이 격자: 픽셀 없이 화면 비율만으로 줄·칸이 나온다
 	recorder.check('트레이 - 부품이 없으면 페이지도 없다',
 		traySlotsPerPage(layout, phoneAspect, 0) === 0
 		&& trayPageCount(0, 3) === 0,
 		`${traySlotsPerPage(layout, phoneAspect, 0)}`);
 	const perPage = traySlotsPerPage(layout, phoneAspect, 7);
-	recorder.check('트레이 - 한 페이지 슬롯 수가 최소·최대 사이',
-		perPage >= TRAY_MIN_VISIBLE_SLOTS && perPage <= TRAY_MAX_VISIBLE_SLOTS,
+	recorder.check('트레이 - 한 페이지 슬롯 수가 최대 이하',
+		perPage >= 1 && perPage <= TRAY_MAX_VISIBLE_SLOTS,
 		`${perPage}`);
 	recorder.check('트레이 - 슬롯이 페이지 크기보다 적으면 한 페이지',
 		trayPageCount(2, traySlotsPerPage(layout, phoneAspect, 2)) === 1,
@@ -837,6 +840,80 @@ function testRelativeLayout(recorder: TestRecorder): void {
 	recorder.check('트레이 - 7개를 페이지로 나누면 모두 볼 수 있다',
 		trayPageCount(7, perPage) * perPage >= 7,
 		`${trayPageCount(7, perPage)} * ${perPage}`);
+
+	// **격자가 트레이를 넘지 않는다** - "부품이 잘려서 안 보인다" 의 회귀 방지.
+	//
+	// 예전에는 한 줄만 쓰면서 `TRAY_MIN_VISIBLE_SLOTS`(3) 로 페이지 크기를 끌어올렸다.
+	// 세로로 긴 화면에서는 슬롯 하나가 화면 폭의 44% 라 셋이 들어갈 자리가 없었는데도
+	// 셋을 폈고, 넘친 부분을 `overflow: hidden` 이 잘라내 **부품이 든 첫 슬롯이 화면 밖으로
+	// 밀려났다.** 지금은 줄을 쌓아 넘치지 않는 배치만 고른다.
+	const trayShapes: { name: string, aspect: number }[] = [
+		{ name: '세로 폰', aspect: phoneAspect },
+		{ name: '세로 태블릿', aspect: 0.75 },
+		{ name: '정사각', aspect: 1 },
+		{ name: '가로', aspect: 1.78 },
+		{ name: '아주 긴 세로', aspect: 0.35 },
+	];
+	let trayOverflow = '';
+	let trayHeightMismatch = '';
+	let trayPaged = '';
+	for (const shape of trayShapes) {
+		const trayWidth = TRAY_WIDTH_USAGE;
+		const trayHeight = auxAreaFraction(layout) * TRAY_HEIGHT_USAGE / shape.aspect;
+		for (let count = 1; count <= TRAY_MAX_VISIBLE_SLOTS; count++) {
+			const grid = trayGrid(layout, shape.aspect, count);
+			const side = grid.slot.ofWidth;
+			if (grid.cols * side > trayWidth + 1e-9 || grid.rows * side > trayHeight + 1e-9) {
+				trayOverflow += ` ${shape.name}/${count}=${grid.rows}x${grid.cols}`;
+			}
+			// 화면에 넣는 높이 %로 되그렸을 때 계산과 같은 크기여야 한다
+			if (Math.abs(grid.slotHeightPercent / 100 * trayHeight - side) > 1e-9) {
+				trayHeightMismatch += ` ${shape.name}/${count}`;
+			}
+			if (grid.perPage < count) {
+				trayPaged += ` ${shape.name}/${count}`;
+			}
+		}
+	}
+	recorder.check('트레이 - 어느 화면에서도 격자가 트레이를 넘지 않는다',
+		trayOverflow === '', trayOverflow);
+	recorder.check('트레이 - 슬롯 높이 %가 계산한 크기와 같다',
+		trayHeightMismatch === '', trayHeightMismatch);
+	recorder.check('트레이 - 최대 슬롯 수까지는 한 페이지에 다 보인다',
+		trayPaged === '', trayPaged);
+	recorder.check('트레이 - 부품이 하나면 트레이를 꽉 채운다',
+		trayGrid(layout, phoneAspect, 1).rows === 1
+		&& trayGrid(layout, phoneAspect, 1).cols === 1,
+		`${trayGrid(layout, phoneAspect, 1).rows}x${trayGrid(layout, phoneAspect, 1).cols}`);
+	recorder.check('트레이 - 세로 화면에서 넷은 2x2 로 놓인다',
+		trayGrid(layout, phoneAspect, 4).rows === 2
+		&& trayGrid(layout, phoneAspect, 4).cols === 2,
+		`${trayGrid(layout, phoneAspect, 4).rows}x${trayGrid(layout, phoneAspect, 4).cols}`);
+
+	// **글자 크기** - "모바일에서 글씨가 너무 작다" 의 회귀 방지.
+	//
+	// 원인은 배율의 기준이었다. 글자 한계(min/max)는 기준 캔버스 1180 픽셀로 튜닝한 값이라
+	// `pixelScale` 을 곱해야 하는데, 그 배율을 **읽기값**(590x1280)에서 뽑으면 1.08 이 되어
+	// 실제(2560 기준 2.17)의 절반으로 그려졌다. 두 배율에서 나온 글자 크기를 비교해 못박는다.
+	const readingScale = canvasPixelScale(1280);
+	const unitScale = canvasPixelScale(1280 * 2);
+	recorder.check('글자 배율 - 좌표 단위 기준이 읽기값 기준보다 크다',
+		unitScale > readingScale * 1.9, `${unitScale} vs ${readingScale}`);
+
+	// 실측 폰에서 카탈로그 카드(사용 가능 세로의 16%)의 제목이 화면 세로의 2% 는 되어야 한다.
+	// 2% 면 2556px 화면에서 약 51px - 팔 길이에서 읽히는 최소선이다.
+	const unitsHeight = 1280 * 2;
+	const cardHeight = unitsHeight * 0.9 * 0.16;
+	const cardTitle = fitFontSize(cardHeight,
+		{ ratio: 0.3, minimum: 18, maximum: 34, pixelScale: unitScale });
+	recorder.check('글자 크기 - 카탈로그 카드 제목이 화면 세로의 2% 이상',
+		cardTitle >= unitsHeight * 0.02, `${cardTitle} < ${unitsHeight * 0.02}`);
+
+	// 같은 계산을 읽기값 배율로 하면 이 선을 넘지 못한다 - 그것이 신고된 증상이었다
+	const tooSmall = fitFontSize(1280 * 0.9 * 0.16,
+		{ ratio: 0.3, minimum: 18, maximum: 34, pixelScale: readingScale });
+	recorder.check('글자 크기 - 읽기값 배율은 그 선에 못 미친다 (회귀 증상)',
+		tooSmall < unitsHeight * 0.02, `${tooSmall}`);
 
 	// 스타일에 그대로 들어가는 문자열이라 형식이 깨지면 배치가 통째로 무너진다
 	recorder.check('퍼센트 문자열 - 정수', percentText(96) === '96%', percentText(96));

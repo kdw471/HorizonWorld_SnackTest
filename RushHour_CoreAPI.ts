@@ -35,7 +35,15 @@
 
 import { Component, PropTypes } from 'horizon/core';
 import { EventPublisher } from 'Utility_Events';
-import { connectPuzzleUpdate, enterPuzzleInteraction, exitPuzzleInteraction } from 'Puzzle_HorizonBridge';
+import {
+	PuzzleGridPoint,
+	PuzzleScreenDragStream,
+	connectPuzzleUpdate,
+	enterPuzzleInteraction,
+	enterPuzzleTouchStream,
+	exitPuzzleInteraction,
+	exitPuzzleTouchStream,
+} from 'Puzzle_HorizonBridge';
 import { EPuzzleId, getCatalogEntry } from 'PuzzleUI_Definitions';
 import { PuzzleHubRegistry, buildPuzzleLevelTable, createPuzzleHandle } from 'PuzzleUI_Registry';
 import { EBoardCellAccent, PUZZLE_BOARD_CELL_OUTSIDE, PuzzleBoardColor, PuzzleTextureKey, boardColor, textureKey } from 'PuzzleBoardUI_Definitions';
@@ -115,6 +123,19 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		autoStart: { type: PropTypes.Boolean, default: false },
 		/** 레벨 생성 시드. 0 이면 매번 다른 레벨 */
 		seed: { type: PropTypes.Number, default: 0 },
+		/**
+		 * 드래그를 **연속 좌표 스트림**으로 받을지 (기본 끔) - 개선 제안 §3 제안 1.
+		 *
+		 * 켜면 잡기는 지금처럼 칸 누름으로 하되, 이동·뗌은 Focused Interaction 입력
+		 * (`PlayerControls.onFocusedInteractionInput*`)의 화면 좌표를 격자 좌표로 바꿔 받는다.
+		 * 칸 경계를 기다리지 않아 오브젝트가 손가락을 연속으로 따라오고, 뗌 유실도 사라진다.
+		 *
+		 * Screen Overlay 위 터치가 스트림으로 들어오는 것은 기기 실험(2026-09-04)으로
+		 * 확인되었다. 스트림이 오지 않는 환경에서도 칸 단위 경로가 폴백으로 그대로
+		 * 동작하므로 켜 둔다고 조작이 죽지는 않는다.
+		 * 퍼즐 시작 시 Focused Interaction 모드에 진입한다 (이동/점프 버튼이 숨는다).
+		 */
+		continuousDrag: { type: PropTypes.Boolean, default: false },
 		/** 퀘스트 중 카메라를 고정할지 (기본 끔). 보드가 Custom UI 라 입력에는 필요 없다 */
 		focusCamera: { type: PropTypes.Boolean, default: false },
 		/** `focusCamera` 가 켜졌을 때 카메라가 바라볼 대상 (보통 보드 UI gizmo) */
@@ -171,6 +192,26 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	/** 재사용 버퍼 - 전환마다 Set 을 새로 만들지 않는다 (방법론 §4.4 할당 제로) */
 	private readonly _dirtyCells: Set<number> = new Set<number>();
 
+	/**
+	 * 릴리즈 코얼레싱 (개선 제안 §3 제안 2) - `endDrag()` 가 같은 이벤트 턴 안에서 띄우는
+	 * 세션 이벤트(PIECE_MOVED, USB_DOCKED/UNDOCKED)의 리페인트를 건너뛰고,
+	 * `onDragEnd` 마지막의 **1회**로 합친다. 예전에는 릴리즈 한 번에 전체 리페인트가
+	 * 최대 3회 돌아 "놓는 순간이 유독 느린" 체감의 원인이었다.
+	 */
+	private _isReleaseCoalescing: boolean = false;
+	/**
+	 * 릴리즈 중 결합/분리가 일어났다 - 점유 칸이 2↔3 으로 바뀌어 영향 범위를 미리 알 수 없으므로,
+	 * 이 릴리즈만은 더티 필터 없이 전체를 그린다 (개선 제안 §3 제안 3의 예외).
+	 */
+	private _didReleaseChangeWholeBoard: boolean = false;
+
+	/**
+	 * 연속 좌표 드래그 스트림 (제안 1) - `continuousDrag` prop 을 켰을 때만 만든다.
+	 * 잡기는 칸 누름이 맡고, 스트림이 실제로 이동을 배달하기 시작하면(`isDriving`)
+	 * 칸 단위 move/up 은 무시된다 - 폴백 규칙은 `PuzzleScreenDragStream` 머리말 참고.
+	 */
+	private _dragStream: PuzzleScreenDragStream | undefined = undefined;
+
 	private _isInteractionActive: boolean = false;
 
 	//#region Lifecycle
@@ -215,6 +256,18 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		this.registerTextures();
 		this.createPresenter();
 		this.subscribeToSessionEvents();
+
+		if (this.props.continuousDrag) {
+			// 제안 1 - 이동·뗌을 Focused Interaction 스트림으로 받는다 (잡기는 칸 누름 그대로)
+			this._dragStream = new PuzzleScreenDragStream(
+				this, RUSH_HOUR_FULL_GRID_SIZE, RUSH_HOUR_FULL_GRID_SIZE, {
+					onStreamMove: (point) => this.onStreamDragMove(point),
+					onStreamEnd: (point) => this.onStreamDragEnd(point),
+				});
+			console.log('[RushHourCoreAPI] Continuous drag stream is enabled. '
+				+ 'Move/release come from Focused Interaction input when the stream delivers; '
+				+ 'cell-based input stays as the fallback.');
+		}
 
 		// 이것을 빠뜨리면 제한 시간이 흐르지 않는다
 		connectPuzzleUpdate(this, (deltaSeconds) => this.session.update(deltaSeconds));
@@ -301,11 +354,40 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		this._originCol = piece.col;
 		// 세로/가로 오브젝트는 잡는 순간 축이 정해진다. 1x1(FREE) 은 처음 움직일 때 정해진다
 		this._dragAxis = toDragAxis(piece.orientation);
+		// 제안 1 - 잡기에 성공했다. 이 드래그의 이동·뗌 스트림을 받기 시작한다
+		this._dragStream?.notifyDragBegan();
 		this.applyGridVisuals();
 	}
 
 	private onDragMove(cell: number): void {
+		// 스트림이 이 드래그를 넘겨받았다 - 칸 단위 좌표를 겹쳐 넣지 않는다 (제안 1 폴백 규칙)
+		if (this._dragStream?.isDriving === true) {
+			return;
+		}
 		this.trackDragTo(cell);
+	}
+
+	/**
+	 * 스트림의 이동 (제안 1) - 연속 전체 그리드 좌표가 입력 이벤트 해상도로 온다.
+	 * 칸 경계를 기다리는 칸 단위 경로와 달리 한 칸 안의 움직임도 그대로 반영된다.
+	 */
+	private onStreamDragMove(point: PuzzleGridPoint): void {
+		if (this._previewPieceId === undefined) {
+			return;
+		}
+		this.trackDragToLocal(point.row - RUSH_HOUR_PLAY_ORIGIN, point.col - RUSH_HOUR_PLAY_ORIGIN);
+	}
+
+	/** 스트림의 뗌 (제안 1) - `inputEnded` 는 유실되지 않으므로 릴리즈 유실 문제가 사라진다 */
+	private onStreamDragEnd(point: PuzzleGridPoint): void {
+		if (this._previewPieceId === undefined) {
+			return;
+		}
+		// 좌표를 만들 수 없었던 뗌(NaN)은 마지막 이동이 반영한 자리에 그대로 확정한다
+		if (isNaN(point.row) === false && isNaN(point.col) === false) {
+			this.trackDragToLocal(point.row - RUSH_HOUR_PLAY_ORIGIN, point.col - RUSH_HOUR_PLAY_ORIGIN);
+		}
+		this.finalizeDrag();
 	}
 
 	/**
@@ -324,8 +406,22 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		if (cell === PUZZLE_BOARD_CELL_OUTSIDE) {
 			return false;
 		}
+		return this.trackDragToLocal(toLocalRow(cell), toLocalCol(cell));
+	}
 
-		const visual = this.session.updateDrag(toLocalRow(cell), toLocalCol(cell));
+	/**
+	 * 플레이 로컬 좌표(연속)를 미리보기에 반영하는 본체.
+	 *
+	 * 칸 단위 경로(`trackDragTo`)와 스트림 경로(`onStreamDragMove`, 제안 1)가 여기서
+	 * 합류한다 - 컨트롤러가 연속 좌표를 받도록 설계되어 있어 로직은 하나면 된다.
+	 * 격자 밖 좌표도 그대로 넘긴다 (§8.4) - 경계 클램프는 컨트롤러의 몫이다.
+	 */
+	private trackDragToLocal(localRow: number, localCol: number): boolean {
+		if (this._previewPieceId === undefined) {
+			return false;
+		}
+
+		const visual = this.session.updateDrag(localRow, localCol);
 		if (visual === undefined) {
 			return false;
 		}
@@ -403,13 +499,77 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	 * 버리고 곧바로 `endDrag()` 를 불렀는데, 그러면 마지막 `onCellMove` 가 기록한 자리로
 	 * 스냅된다. 빠르게 끌다 놓으면 손가락이 지나온 칸에 조각이 남아, 놓은 자리에 서지 않는
 	 * 것처럼 보였다.
+	 *
+	 * 리페인트는 **이 함수 마지막의 1회뿐이다** (제안 2). `endDrag()` 가 띄우는
+	 * PIECE_MOVED / USB_DOCKED / USB_UNDOCKED 구독은 코얼레싱 플래그를 보고 건너뛴다.
+	 * 그 1회도 결합/분리가 없었다면 실제로 바뀌는 칸(원래 자리·확정 자리·이동 축의 길)만
+	 * 기록한다 (제안 3).
 	 */
 	private onDragEnd(cell: number): void {
+		// 스트림이 이 드래그를 넘겨받았다 - 뗌도 스트림(`onStreamDragEnd`)이 확정한다.
+		// 여기서 함께 확정하면 endDrag 가 두 번 돌고 릴리즈 리페인트도 두 번이 된다 (제안 1).
+		if (this._dragStream?.isDriving === true) {
+			return;
+		}
 		this.trackDragTo(cell);
+		this.finalizeDrag();
+	}
+
+	/**
+	 * 릴리즈 확정의 본체 - 칸 단위 경로(`onDragEnd`)와 스트림 경로(`onStreamDragEnd`)가
+	 * 합류한다. 마지막 좌표 반영은 각 경로가 이미 끝냈다.
+	 */
+	private finalizeDrag(): void {
+		// 더티 칸은 endDrag() **전에** 모은다 - 길 범위(getMaxSteps)가 이동 확정 뒤에는 달라진다
+		const canNarrowRepaint = this.collectReleaseDirtyCells();
+
+		this._isReleaseCoalescing = true;
+		this._didReleaseChangeWholeBoard = false;
 		this.session.endDrag();
+		this._isReleaseCoalescing = false;
+
+		const pieceId = this._previewPieceId;
 		this._previewPieceId = undefined;
 		this._dragAxis = EDragAxis.UNDECIDED;
-		this.applyGridVisuals();
+
+		// 스냅으로 확정된 최종 자리. 미리보기 자리와 같아야 하지만 반올림 규칙에 기대지 않고 넣는다
+		const piece = pieceId === undefined ? undefined : this.session.board?.getPiece(pieceId);
+		if (canNarrowRepaint && piece !== undefined && this._didReleaseChangeWholeBoard === false) {
+			this.collectFootprint(piece, piece.row, piece.col);
+			this._repaintFilter = this._dirtyCells;
+			this.applyGridVisuals();
+			this._repaintFilter = undefined;
+		}
+		else {
+			this.applyGridVisuals();
+		}
+	}
+
+	/**
+	 * 릴리즈 확정에서 값이 바뀔 수 있는 칸을 모은다 (제안 3).
+	 *
+	 * 원래 자리(실루엣이 꺼진다) · 미리보기 자리(확정 본체로 바뀐다) · 이동 축의 길
+	 * (PATH 강조가 꺼진다) 뿐이다. 다른 오브젝트·도착 포인트·바탕은 릴리즈로 바뀌지 않는다.
+	 * 결합/분리는 점유 칸이 2↔3 으로 바뀌므로 호출부가 전체 리페인트로 되돌린다.
+	 */
+	private collectReleaseDirtyCells(): boolean {
+		const board = this.session.board;
+		const pieceId = this._previewPieceId;
+		if (board === undefined || pieceId === undefined) {
+			return false;
+		}
+		const piece = board.getPiece(pieceId);
+		if (piece === undefined) {
+			return false;
+		}
+
+		this._dirtyCells.clear();
+		this.collectFootprint(piece, this._originRow, this._originCol);
+		this.collectFootprint(piece, this._previewRow, this._previewCol);
+		this.forEachDragPathCell((row, col) => {
+			this._dirtyCells.add(toFullGridIndex(row) * RUSH_HOUR_FULL_GRID_SIZE + toFullGridIndex(col));
+		});
+		return true;
 	}
 
 	//#endregion
@@ -417,16 +577,24 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	//#region Focused interaction lifecycle (선택 - focusCamera 를 켰을 때만)
 
 	private enterInteraction(): void {
-		if (this.props.focusCamera === false || this._isInteractionActive) {
+		if (this._isInteractionActive) {
 			return;
 		}
-		this._isInteractionActive = true;
-		enterPuzzleInteraction(this, {
-			cameraObject: this.props.cameraObject ?? undefined,
-			boardCentre: this.props.cameraDistance > 0 ? (this.props.boardCentre ?? undefined) : undefined,
-			distance: this.props.cameraDistance,
-			fov: this.props.cameraFov > 0 ? this.props.cameraFov : undefined,
-		});
+		if (this.props.focusCamera) {
+			this._isInteractionActive = true;
+			enterPuzzleInteraction(this, {
+				cameraObject: this.props.cameraObject ?? undefined,
+				boardCentre: this.props.cameraDistance > 0 ? (this.props.boardCentre ?? undefined) : undefined,
+				distance: this.props.cameraDistance,
+				fov: this.props.cameraFov > 0 ? this.props.cameraFov : undefined,
+			});
+			return;
+		}
+		if (this.props.continuousDrag) {
+			// 제안 1 - 스트림은 Focused Interaction 모드에서만 흐른다. 카메라는 그대로 둔다.
+			this._isInteractionActive = true;
+			enterPuzzleTouchStream(this);
+		}
 	}
 
 	private releaseInteraction(): void {
@@ -434,7 +602,12 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 			return;
 		}
 		this._isInteractionActive = false;
-		exitPuzzleInteraction(this);
+		if (this.props.focusCamera) {
+			exitPuzzleInteraction(this);
+		}
+		else {
+			exitPuzzleTouchStream(this);
+		}
 	}
 
 	//#endregion
@@ -514,7 +687,13 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	private subscribeToSessionEvents(): void {
 		this.events.LEVEL_LOADED.subscribe(this.onLevelLoaded.bind(this));
 
-		this.events.PIECE_MOVED.subscribe(() => this.applyGridVisuals());
+		this.events.PIECE_MOVED.subscribe(() => {
+			// 릴리즈 턴에는 onDragEnd 마지막의 1회로 합친다 (제안 2)
+			if (this._isReleaseCoalescing) {
+				return;
+			}
+			this.applyGridVisuals();
+		});
 
 		// §9 - 결합/분리는 점유 칸이 2 <-> 3 으로 바뀌므로 반드시 다시 그린다
 		this.events.USB_DOCKED.subscribe(this.onUsbDocked.bind(this));
@@ -536,12 +715,24 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	}
 
 	private onUsbDocked(piece: RushHourPiece): void {
-		this.applyGridVisuals();
+		if (this._isReleaseCoalescing) {
+			// 결합은 점유 칸을 2->3 으로 바꾼다 - 이번 릴리즈는 더티 필터 없이 전체를 그린다
+			this._didReleaseChangeWholeBoard = true;
+		}
+		else {
+			this.applyGridVisuals();
+		}
 		console.log(`[RushHourCoreAPI] USB docked: ${piece.id}`);
 	}
 
 	private onUsbUndocked(piece: RushHourPiece): void {
-		this.applyGridVisuals();
+		if (this._isReleaseCoalescing) {
+			// 분리는 점유 칸을 3->2 로 바꾼다 - 이번 릴리즈는 더티 필터 없이 전체를 그린다
+			this._didReleaseChangeWholeBoard = true;
+		}
+		else {
+			this.applyGridVisuals();
+		}
 		console.log(`[RushHourCoreAPI] USB undocked: ${piece.id}`);
 	}
 
@@ -668,6 +859,24 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	 * 갈 수 있는 만큼만 그려진다. 축이 아직 정해지지 않은 1x1 오브젝트는 그리지 않는다.
 	 */
 	private applyDragPathVisuals(): void {
+		this.forEachDragPathCell((row, col) => {
+			this.setFullGridCell(toFullGridIndex(row), toFullGridIndex(col), {
+				fill: COLOR_EMPTY,
+				texture: TEXTURE_EMPTY,
+				label: '',
+				isHighlighted: false,
+				accent: EBoardCellAccent.PATH,
+			});
+		});
+	}
+
+	/**
+	 * 끌고 있는 오브젝트의 이동 축을 따라 길이 깔리는 칸을 차례로 돌려준다 (플레이 로컬 좌표).
+	 *
+	 * 길을 그릴 때(`applyDragPathVisuals`)와 릴리즈에서 길이 꺼질 칸을 모을 때
+	 * (`collectReleaseDirtyCells`)가 같은 범위를 쓴다 - 계산을 한 곳에 둬야 서로 어긋나지 않는다.
+	 */
+	private forEachDragPathCell(visit: (row: number, col: number) => void): void {
 		const pieceId = this._previewPieceId;
 		const board = this.session.board;
 		if (pieceId === undefined || board === undefined || this._dragAxis === EDragAxis.UNDECIDED) {
@@ -693,13 +902,7 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 			if (isInsidePlayField(row, col) === false) {
 				continue;
 			}
-			this.setFullGridCell(toFullGridIndex(row), toFullGridIndex(col), {
-				fill: COLOR_EMPTY,
-				texture: TEXTURE_EMPTY,
-				label: '',
-				isHighlighted: false,
-				accent: EBoardCellAccent.PATH,
-			});
+			visit(row, col);
 		}
 	}
 
