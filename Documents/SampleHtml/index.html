@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>2D Board Game UI</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: sans-serif;
+    }
+    
+    /* 앱 전체 컨테이너 */
+    #app-container {
+      display: flex;
+      flex-direction: column;
+      width: 100vw;
+      height: 100vh;
+      background-color: #1a1a1a;
+    }
+
+    /* 상단 70% 영역: 게임 영역 */
+    #game-area {
+      flex: 7; /* 70% 비율 */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 16px;
+      position: relative;
+      background-color: #2a2a2a;
+    }
+
+    /* 하단 30% 영역: UI/컨트롤 영역 */
+    #ui-area {
+      flex: 3; /* 30% 비율 */
+      background-color: #121212;
+      color: #ffffff;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      border-top: 2px solid #333;
+    }
+
+    /* 정사각형 2D 보드 (70% 영역 내에서 가장 크게 맞춤) */
+    #board {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      /* 너비와 높이 중 작은 쪽에 맞춰 1:1 비율 유지 */
+      max-width: min(100%, 100vh * 0.7 - 32px);
+      max-height: min(100%, 100vw - 32px);
+      aspect-ratio: 1 / 1;
+      background-color: #333;
+      gap: 4px;
+      padding: 4px;
+      border-radius: 8px;
+    }
+
+    /* 격자 셀 스타일 */
+    .cell {
+      background-color: #4e4e4e;
+      border-radius: 4px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      color: #fff;
+      font-weight: bold;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="app-container">
+    <div id="game-area">
+      <div id="board"></div>
+    </div>
+    <div id="ui-area">
+      <h2>UI 영역 (30%)</h2>
+      <p id="status-text">게임 대기 중...</p>
+    </div>
+  </div>
+  <script src="./dist/game.js"></script>
+</body>
+</html>

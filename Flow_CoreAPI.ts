@@ -1,0 +1,661 @@
+/**
+ * Flow Core API - PUZ_05 연결 퍼즐을 실제 월드에서 구동하는 Horizon Component
+ *
+ * `Switch_CoreAPI` 와 같은 구조다. 브리지·보드 UI·소유권 컴포넌트는 그대로 재사용한다
+ * (`Documents/생성 문서/구현 사항/작업기록_2026-09-02_보드_CustomUI_전환.md` §6.3).
+ *
+ * ## 이 퍼즐의 표현 결정
+ *
+ * - 필드가 그대로 7×7 격자라 (§3) 좌표 변환이 없다. 칸 번호 = `row * 7 + col`.
+ * - **타일이 없는 칸과 오브젝트가 없는 칸은 그리지 않는다.** 보이지 않는 칸은 눌리지 않으므로,
+ *   경로가 지나갈 수 없는 자리를 잘못 잡는 일이 원천적으로 사라진다
+ *   (`Flow_Board.canExtend()` 도 두 경우를 모두 NO_TILE 로 거절한다).
+ * - 메인 오브젝트(전구, §4)는 자기 색으로 칠하고 테두리를 준다. 서브 오브젝트는 색을 받기 전에는
+ *   회색이고, 경로가 지나가면 그 색으로 바뀐다 - §5 "연결되면 색을 부여받는다" 그대로다.
+ * - 지금 그리고 있는 경로의 머리에 테두리를 얹어 어디까지 왔는지 보이게 한다.
+ *
+ * ## 조작
+ *
+ * 드래그다 (§6). 칸 번호를 행/열로 풀어 `beginDraw / moveDraw / endDraw` 에 넘긴다.
+ * 격자 밖으로 나간 동안에는 `moveDraw` 를 부르지 않는다. 그리던 경로는 그대로 유지되고,
+ * 다시 격자로 들어오면 이어서 그려진다 (PUZ_00 §8.4 - 영역을 벗어나도 드래그는 유지).
+ *
+ * ## 붙이는 법
+ *
+ * `Documents/생성 문서/가이드/에디터_퍼즐_셋업.md` 와 동일하다.
+ *
+ * ## 텍스처
+ *
+ * 판 위 요소에 그림을 입힐 수 있다. 에디터에서 텍스처 애셋을 아래 prop 에 끼우면 그 요소가
+ * 그림으로 그려지고, **비워 두면 예전처럼 색으로 그려진다.** 구조는
+ * `PuzzleBoardUI_TextureLibrary.ts` 머리말에 있다.
+ */
+
+import { Component, PropTypes } from 'horizon/core';
+import {
+	PuzzleGridPoint,
+	PuzzleScreenDragStream,
+	connectPuzzleUpdate,
+	enterPuzzleInteraction,
+	enterPuzzleTouchStream,
+	exitPuzzleInteraction,
+	exitPuzzleTouchStream,
+} from 'Puzzle_HorizonBridge';
+import { EPuzzleId, getCatalogEntry } from 'PuzzleUI_Definitions';
+import { PuzzleHubRegistry, buildPuzzleLevelTable, createPuzzleHandle } from 'PuzzleUI_Registry';
+import { EBoardCellAccent, NO_TEXTURE, PUZZLE_BOARD_CELL_OUTSIDE, PuzzleBoardColor, PuzzleTextureKey, boardColor, textureKey } from 'PuzzleBoardUI_Definitions';
+import { PuzzleTextureLibrary } from 'PuzzleBoardUI_TextureLibrary';
+import { PuzzleBoardPresenter, PuzzleBoardStage } from 'PuzzleBoardUI_Presenter';
+import { FlowLevelGenerator } from 'Flow_LevelGenerator';
+import { FlowEvents } from 'Flow_GameEvents';
+import { FlowTables } from 'Flow_DataTables';
+import { FlowSession } from 'Flow_Session';
+import {
+	EFlowColor,
+	ENodeKind,
+	ENodeRole,
+	assignFlowPairLabels,
+	getFlowNodeLabel,
+	FLOW_GRID_SIZE,
+	FlowLevel,
+	FlowResultData,
+} from 'Flow_Definitions';
+
+/** 전구 색상 8종. 실제 머티리얼이 들어오면 이 표만 바꾸면 된다 */
+const FLOW_COLORS: { [color: string]: PuzzleBoardColor } = {
+	RED: boardColor(0.9, 0.22, 0.22),
+	ORANGE: boardColor(0.95, 0.56, 0.16),
+	YELLOW: boardColor(0.93, 0.87, 0.22),
+	GREEN: boardColor(0.24, 0.78, 0.32),
+	CYAN: boardColor(0.2, 0.8, 0.82),
+	BLUE: boardColor(0.26, 0.46, 0.92),
+	PURPLE: boardColor(0.62, 0.36, 0.86),
+	PINK: boardColor(0.95, 0.5, 0.74),
+};
+
+/** §4 - 아직 색을 받지 못한 서브 오브젝트(회색 전구) */
+const COLOR_UNLIT_SUB: PuzzleBoardColor = boardColor(0.35, 0.36, 0.42);
+
+/** 경로가 지나간 서브 오브젝트를 메인보다 어둡게 만드는 비율 - 출발/도착 지점이 눈에 띄게 한다 */
+const SUB_TONE_SCALE = 0.7;
+
+/** 밝은 전구 위에 얹는 글자색 - 노랑·연두 위에서도 읽히도록 어둡게 둔다 */
+const COLOR_NODE_LABEL: PuzzleBoardColor = boardColor(0.08, 0.08, 0.1);
+
+/**
+ * 이 퍼즐의 텍스처 키. 에디터 prop 과 1:1 로 대응한다.
+ * 에셋을 끼우지 않은 키는 라이브러리에 등록되지 않으므로 색으로 그려진다.
+ */
+/** 전구(경로의 양 끝) */
+const TEXTURE_NODE: PuzzleTextureKey = textureKey('flow', 'node');
+/** 출발 / 도착 전구를 그림으로도 가른다 - 없으면 위의 공통 전구 그림으로 떨어진다 */
+const TEXTURE_NODE_START: PuzzleTextureKey = textureKey('flow', 'nodeStart');
+const TEXTURE_NODE_END: PuzzleTextureKey = textureKey('flow', 'nodeEnd');
+/** 이어 그린 선이 지나는 칸 */
+const TEXTURE_PATH: PuzzleTextureKey = textureKey('flow', 'path');
+/** 아무것도 없는 칸 */
+const TEXTURE_EMPTY: PuzzleTextureKey = textureKey('flow', 'empty');
+/** 격자 뒤에 까는 판 그림 */
+const TEXTURE_BOARD: PuzzleTextureKey = textureKey('flow', 'board');
+
+export class FlowCoreAPI extends Component<typeof FlowCoreAPI> {
+	public static propsDefinition = {
+		/** 시작할 난이도 (1~5) */
+		difficulty: { type: PropTypes.Number, default: 1 },
+		/** 컴포넌트 시작과 동시에 퀘스트를 시작할지 */
+		autoStart: { type: PropTypes.Boolean, default: false },
+		/** 레벨 생성 시드. 0 이면 매번 다른 레벨 */
+		seed: { type: PropTypes.Number, default: 0 },
+		/**
+		 * 그리기를 **연속 좌표 스트림**으로 받을지 (기본 켬) - 개선 제안 §3 제안 1.
+		 * 규칙과 전제는 `RushHour_CoreAPI.continuousDrag` 주석과 같다. 빠른 스와이프에서
+		 * 칸의 `onEnter` 가 건너뛰어져도 스트림이 지나간 칸을 그대로 주므로 선이 손가락을 따라온다.
+		 */
+		continuousDrag: { type: PropTypes.Boolean, default: true },
+		/** 퀘스트 중 카메라를 고정할지 (기본 끔). 보드가 Custom UI 라 입력에는 필요 없다 */
+		focusCamera: { type: PropTypes.Boolean, default: false },
+		/** `focusCamera` 가 켜졌을 때 카메라가 바라볼 대상 (보통 보드 UI gizmo) */
+		boardCentre: { type: PropTypes.Entity },
+		/** 카메라를 놓을 엔티티. 비우면 `boardCentre` 정면에 자동 배치한다 */
+		cameraObject: { type: PropTypes.Entity },
+		/** 보드에서 카메라까지 거리 (m) */
+		cameraDistance: { type: PropTypes.Number, default: 0.6 },
+		/** 카메라 시야각 */
+		cameraFov: { type: PropTypes.Number, default: 40 },
+
+		// --- 텍스처 (전부 선택) - 비워 두면 그 요소는 색으로 그려진다 ---
+		/** 전구(경로의 양 끝) - 아래 출발/도착 그림이 없을 때의 기본 */
+		nodeTexture: { type: PropTypes.Asset },
+		/** 출발 전구 */
+		nodeStartTexture: { type: PropTypes.Asset },
+		/** 도착 전구 */
+		nodeEndTexture: { type: PropTypes.Asset },
+		/** 이어 그린 선이 지나는 칸 */
+		pathTexture: { type: PropTypes.Asset },
+		/** 아무것도 없는 칸 */
+		emptyTexture: { type: PropTypes.Asset },
+		/** 격자 뒤에 까는 판 그림 */
+		boardTexture: { type: PropTypes.Asset },
+	};
+
+	public static instance: FlowCoreAPI | undefined = undefined;
+
+	public events!: FlowEvents;
+	public session!: FlowSession;
+	public tables!: FlowTables;
+
+	private _presenter!: PuzzleBoardPresenter;
+
+	/** 직전에 세션에 넘긴 칸. 건너뛴 입력을 보간하는 기준이다 (`onDrawMove` 참고) */
+	private _lastDrawnRow: number = 0;
+	private _lastDrawnCol: number = 0;
+
+	private _isInteractionActive: boolean = false;
+
+	/**
+	 * 연속 좌표 드래그 스트림 (제안 1) - `continuousDrag` prop 을 켰을 때만 만든다.
+	 * 스트림이 이 드래그를 넘겨받은 동안(`isDriving`) 칸 단위 move/up 은 무시된다 -
+	 * 폴백 규칙은 `PuzzleScreenDragStream` 머리말 참고.
+	 */
+	private _dragStream: PuzzleScreenDragStream | undefined = undefined;
+
+	//#region Lifecycle
+
+	public start(): void {
+		if (this.entity.owner.get() === this.world.getServerPlayer()) {
+			console.log('[FlowCoreAPI] Server instance. Waiting for ownership transfer. '
+				+ '(If only this log appears without the "local start" log, set the script execution mode to Local '
+				+ 'and make sure this entity is in Puzzle_LocalOwnership targets.)');
+			return;
+		}
+
+		console.log('[FlowCoreAPI] Started on the local client. Ownership transfer OK.');
+
+		this.constructSystems();
+
+		if (this.props.autoStart) {
+			this.startQuestByDifficulty(this.props.difficulty);
+		}
+	}
+
+	public dispose(): void {
+		PuzzleBoardStage.instance.unmount(this._presenter);
+		this.releaseInteraction();
+		if (FlowCoreAPI.instance === this) {
+			FlowCoreAPI.instance = undefined;
+		}
+	}
+
+	private constructSystems(): void {
+		this.tables = new FlowTables();
+		this.events = new FlowEvents();
+		this.session = new FlowSession(
+			this.events,
+			this.tables,
+			new FlowLevelGenerator(this.tables),
+			// 솔버는 힌트(getSolutionPaths)에만 쓰이므로 세션의 기본 인스턴스를 그대로 둔다
+			undefined,
+			{ seed: this.props.seed > 0 ? this.props.seed : undefined },
+		);
+
+		this.registerTextures();
+		this.createPresenter();
+		this.subscribeToSessionEvents();
+
+		// 제안 1 - 이동·뗌을 Focused Interaction 스트림으로 받는다 (잡기는 칸 누름 그대로).
+		//
+		// **스트림은 prop 과 무관하게 언제나 만든다.** `continuousDrag` 가 정하는 것은 이동까지
+		// 스트림이 몰지(`drivesMoves`)뿐이고, 뗌 안전망(`onStreamRelease`)은 언제나 필요하다 -
+		// Custom UI 의 release 가 유실되면 그것이 유일하게 남는 "손을 뗐다" 신호이기 때문이다.
+		this._dragStream = new PuzzleScreenDragStream(
+			this, FLOW_GRID_SIZE, FLOW_GRID_SIZE, {
+				onStreamMove: (point) => this.onStreamDrawMove(point),
+				onStreamEnd: (point) => this.onStreamDrawEnd(point),
+				onStreamRelease: () => this.onStreamRelease(),
+			},
+			{ drivesMoves: this.props.continuousDrag });
+		console.log('[FlowCoreAPI] Drag stream created '
+			+ `(move driving ${this.props.continuousDrag ? 'on' : 'off'}). `
+			+ 'Release recovery from Focused Interaction input is always on; '
+			+ 'cell-based input stays as the fallback.');
+
+		// 이것을 빠뜨리면 제한 시간이 흐르지 않는다
+		connectPuzzleUpdate(this, (deltaSeconds) => this.session.update(deltaSeconds));
+
+		PuzzleHubRegistry.instance.register(createPuzzleHandle(
+			EPuzzleId.FLOW,
+			{
+				startLevel: (difficulty, fieldOrdinal) => this.startLevel(difficulty, fieldOrdinal),
+				startQuestByDifficulty: (difficulty) => this.startQuestByDifficulty(difficulty),
+				resetLevel: () => this.resetLevel(),
+				pause: () => this.pause(),
+				resume: () => this.resume(),
+				abort: () => this.abort(),
+				getRemainingTimeSeconds: () => this.session.getRemainingTimeSeconds(),
+				getRoundProgress: () => this.session.getRoundProgress(),
+			},
+			this.events,
+			buildPuzzleLevelTable(
+				(difficulty) => this.tables.getQuestByDifficulty(difficulty),
+				(difficulty) => this.tables.getFieldsForDifficulty(difficulty).length,
+			),
+		));
+
+		FlowCoreAPI.instance = this;
+	}
+
+	/**
+	 * 에디터 prop 의 텍스처 애셋을 키에 붙인다.
+	 *
+	 * **프레젠터를 만들기 전에** 부른다. 순서가 뒤집혀도 패널이 세대를 올려 다시 그리지만,
+	 * 먼저 등록해 두면 첫 프레임부터 그림이 붙는다.
+	 */
+	private registerTextures(): void {
+		const count = PuzzleTextureLibrary.instance.registerAll([
+			{ key: TEXTURE_NODE, asset: this.props.nodeTexture },
+			{ key: TEXTURE_NODE_START, asset: this.props.nodeStartTexture ?? this.props.nodeTexture },
+			{ key: TEXTURE_NODE_END, asset: this.props.nodeEndTexture ?? this.props.nodeTexture },
+			{ key: TEXTURE_PATH, asset: this.props.pathTexture },
+			{ key: TEXTURE_EMPTY, asset: this.props.emptyTexture },
+			{ key: TEXTURE_BOARD, asset: this.props.boardTexture },
+		]);
+		console.log(`[FlowCoreAPI] Registered ${count} textures. `
+			+ 'Elements without one are drawn with a flat colour.');
+	}
+
+	private createPresenter(): void {
+		this._presenter = new PuzzleBoardPresenter(
+			{
+				title: getCatalogEntry(EPuzzleId.FLOW)?.displayName ?? '',
+				rowCount: FLOW_GRID_SIZE,
+				colCount: FLOW_GRID_SIZE,
+				boardTexture: TEXTURE_BOARD,
+			},
+			{
+				onCellDown: (cell) => { this.onDrawBegin(cell); },
+				onCellMove: (cell) => { this.onDrawMove(cell); },
+				// §6 - 손을 떼도 그린 경로는 유지된다
+				onCellUp: (cell) => { this.onDrawEnd(cell); },
+				// 보조 레이아웃의 Reset 버튼 - 판만 되돌리고 남은 시간은 그대로 둔다
+				onReset: () => { this.resetLevel(); },
+			},
+		);
+	}
+
+	//#endregion
+
+	//#region Input (프레젠터 -> 세션)
+
+	private onDrawBegin(cell: number): void {
+		this._lastDrawnRow = toRow(cell);
+		this._lastDrawnCol = toCol(cell);
+		const result = this.session.beginDraw(this._lastDrawnRow, this._lastDrawnCol);
+		if (result.isAccepted) {
+			// 제안 1 - 그리기가 시작됐다. 이 드래그의 이동·뗌 스트림을 받기 시작한다
+			this._dragStream?.notifyDragBegan();
+		}
+	}
+
+	/**
+	 * 스트림의 이동 (제안 1) - 연속 전체 그리드 좌표가 입력 이벤트 해상도로 온다.
+	 * 반올림한 칸이 바뀔 때만 세션에 닿는다 - 한 칸 안의 움직임은 경로를 바꾸지 않는다.
+	 */
+	private onStreamDrawMove(point: PuzzleGridPoint): void {
+		if (this.session.dragController?.isDrawing !== true) {
+			return;
+		}
+		this.trackDrawTo(this.toCellFromPoint(point));
+	}
+
+	/** 스트림의 뗌 (제안 1) - `inputEnded` 는 유실되지 않으므로 릴리즈 유실 문제가 사라진다 */
+	private onStreamDrawEnd(point: PuzzleGridPoint): void {
+		if (this.session.dragController?.isDrawing !== true) {
+			return;
+		}
+		// 좌표를 만들 수 없었던 뗌(NaN)은 마지막 이동이 반영한 칸에서 그대로 끝낸다
+		if (isNaN(point.row) === false && isNaN(point.col) === false) {
+			this.trackDrawTo(this.toCellFromPoint(point));
+		}
+		this.session.endDraw();
+	}
+
+	/** 연속 격자 좌표 -> 칸 번호. 격자 밖이면 `PUZZLE_BOARD_CELL_OUTSIDE` */
+	private toCellFromPoint(point: PuzzleGridPoint): number {
+		const row = Math.round(point.row);
+		const col = Math.round(point.col);
+		if (row < 0 || row >= FLOW_GRID_SIZE || col < 0 || col >= FLOW_GRID_SIZE) {
+			return PUZZLE_BOARD_CELL_OUTSIDE;
+		}
+		return row * FLOW_GRID_SIZE + col;
+	}
+
+	/**
+	 * 손가락이 다른 칸으로 들어왔다.
+	 *
+	 * **칸을 건너뛴 입력은 보간해야 한다.** 보드는 상하좌우로 한 칸씩 늘리는 것만 허용하는데
+	 * (§5 대각선 연결 불가), 빠른 스와이프는 중간 칸의 `onEnter` 를 건너뛴다. 그대로 넘기면
+	 * 경로가 끊긴 채 아무 반응이 없다 (`../설계/Horizon통합_아키텍처.md` §1.3, PUZ_05 M3).
+	 *
+	 * 그래서 직전 칸에서 새 칸까지 **한 칸씩 걸어가며** `moveDraw` 를 부른다. 이동량이 큰 축을
+	 * 먼저 소진하는데, 실제 손가락이 지나간 자취에 가장 가깝기 때문이다. 중간에 이을 수 없는
+	 * 칸을 만나면 보드가 거절하므로 경로는 그 자리에서 멈춘다 - 잘못 이어지지 않는다.
+	 */
+	private onDrawMove(cell: number): void {
+		// 스트림이 이 드래그를 넘겨받았다 - 칸 단위 좌표를 겹쳐 넣지 않는다 (제안 1 폴백 규칙)
+		if (this._dragStream?.isDriving === true) {
+			return;
+		}
+		this.trackDrawTo(cell);
+	}
+
+	/** 이동의 본체 - 칸 단위 경로(`onDrawMove`)와 스트림 경로(`onStreamDrawMove`)가 합류한다 */
+	private trackDrawTo(cell: number): void {
+		// 격자 밖에서는 경로를 늘리지 않는다. 그리던 경로는 그대로 남는다 (PUZ_00 §8.4).
+		if (cell === PUZZLE_BOARD_CELL_OUTSIDE) {
+			return;
+		}
+
+		const targetRow = toRow(cell);
+		const targetCol = toCol(cell);
+		let row = this._lastDrawnRow;
+		let col = this._lastDrawnCol;
+
+		// 최대 이동 칸 수는 격자 둘레를 넘지 않는다 - 좌표가 어긋나도 무한 루프가 되지 않게 한다
+		for (let step = 0; step < FLOW_GRID_SIZE * 2; step++) {
+			if (row === targetRow && col === targetCol) {
+				break;
+			}
+			if (Math.abs(targetRow - row) >= Math.abs(targetCol - col)) {
+				row += targetRow > row ? 1 : -1;
+			}
+			else {
+				col += targetCol > col ? 1 : -1;
+			}
+			this.session.moveDraw(row, col);
+		}
+
+		this._lastDrawnRow = targetRow;
+		this._lastDrawnCol = targetCol;
+	}
+
+	/**
+	 * 손을 뗐다 - 선은 **뗀 칸까지** 그려진 채로 멈춘다.
+	 *
+	 * 뗀 칸을 마지막으로 한 번 더 이어 준 뒤에 끝낸다. 빠르게 스와이프하면 마지막 칸의
+	 * `onEnter` 가 뜨기 전에 손이 떨어져, 선이 손가락보다 한두 칸 뒤에서 끊긴 채로
+	 * 남는 일이 있었다.
+	 */
+	private onDrawEnd(cell: number): void {
+		// 그리던 선이 없으면 마감할 것도 없다 - **먼저 도착한 릴리즈가 이긴다**.
+		// 뗌은 칸 `Pressable` 의 release 와 스트림의 `inputEnded` 두 곳에서 올 수 있고,
+		// 둘 중 어느 쪽이든 유실될 수 있다 (`onStreamRelease` 주석).
+		if (this.session.dragController?.isDrawing !== true) {
+			return;
+		}
+		// 스트림이 배달 중이었다면 마지막 자리는 스트림이 이미 더 정확히 반영해 두었다 -
+		// 칸 중심 좌표로 덮어쓰지 않고 확정만 한다.
+		if (this._dragStream?.isDriving !== true) {
+			this.trackDrawTo(cell);
+		}
+		this.session.endDraw();
+	}
+
+	/**
+	 * Focused Interaction 이 알려 준 **터치 종료** - 열려 있는 누름을 닫는다.
+	 *
+	 * Custom UI `Pressable` 의 release 는 모바일에서 유실될 수 있는데, 특히 퍼즐이 막
+	 * 시작해 Focused Interaction 모드에 들어간 **직후 첫 터치**가 그렇다. 그때는 스트림의
+	 * moved 도 아직 흐르지 않아(`isDriving` false) 스트림이 뗌을 확정하지도 않으므로,
+	 * 예전에는 **아무도 드래그를 닫지 않았다** - "첫 드래그만 손을 떼도 놓이지 않는다" 였다.
+	 *
+	 * 프레젠터를 거쳐 닫으므로 평소 릴리즈와 완전히 같은 경로(`onCellUp`)를 탄다.
+	 * 이미 닫혀 있으면 프레젠터가 무시한다 (`PuzzleBoardPresenter.pointerUp`).
+	 */
+	private onStreamRelease(): void {
+		this._presenter.pointerUp();
+	}
+
+	//#endregion
+
+	//#region Focused interaction lifecycle (선택 - focusCamera 를 켰을 때만)
+
+	private enterInteraction(): void {
+		if (this._isInteractionActive) {
+			return;
+		}
+		if (this.props.focusCamera) {
+			this._isInteractionActive = true;
+			enterPuzzleInteraction(this, {
+				cameraObject: this.props.cameraObject ?? undefined,
+				boardCentre: this.props.cameraDistance > 0 ? (this.props.boardCentre ?? undefined) : undefined,
+				distance: this.props.cameraDistance,
+				fov: this.props.cameraFov > 0 ? this.props.cameraFov : undefined,
+			});
+			return;
+		}
+		// **스트림 사용 여부와 무관하게 언제나 들어간다.**
+		//
+		// 예전에는 `continuousDrag` 가 켜졌을 때만 들어갔는데, 그러면 prop 이 꺼진 순간
+		// Focused Interaction 의 `inputEnded` 까지 같이 사라졌다. 그것은 Custom UI 의 release 가
+		// 유실됐을 때 **유일하게 남는 뗼 신호**라, 이동을 칸 단위로 받는 설정에서도 모드는
+		// 필요하다 (`PuzzleDragStreamOptions.drivesMoves` 주석). 카메라는 그대로 둔다.
+		this._isInteractionActive = true;
+		enterPuzzleTouchStream(this);
+	}
+
+	private releaseInteraction(): void {
+		if (this._isInteractionActive === false) {
+			return;
+		}
+		this._isInteractionActive = false;
+		if (this.props.focusCamera) {
+			exitPuzzleInteraction(this);
+		}
+		else {
+			exitPuzzleTouchStream(this);
+		}
+	}
+
+	//#endregion
+
+	//#region Public API (메인 UI 또는 퀘스트 트리거에서 호출한다)
+
+	/**
+	 * 레벨 하나만 플레이한다 (1라운드 고정). 메인 UI 의 Start / Continue 경로다.
+	 * `fieldOrdinal` 은 그 난이도의 판 목록에서의 순번이다 (0-based).
+	 */
+	public startLevel(difficulty: number, fieldOrdinal: number): boolean {
+		this.enterInteraction();
+		this.beginLevelIntro();
+		return this.session.startLevel(difficulty, fieldOrdinal);
+	}
+
+	public startQuestByDifficulty(difficulty: number): boolean {
+		this.enterInteraction();
+		this.beginLevelIntro();
+		return this.session.startQuestByDifficulty(difficulty);
+	}
+
+	public startQuest(questId: string): boolean {
+		this.enterInteraction();
+		this.beginLevelIntro();
+		return this.session.startQuest(questId);
+	}
+
+	/**
+	 * 보조 레이아웃의 Reset 버튼 - 판을 풀기 전 상태로 되돌린다 (남은 시간은 유지).
+	 *
+	 * 배너를 다시 띄우지 않는다. 리셋은 새 레벨의 시작이 아니고, 배너가 뜨는 동안에는
+	 * 보조 레이아웃이 가려져 Reset 버튼 자체가 사라지기 때문이다.
+	 */
+	public resetLevel(): boolean {
+		return this.session.resetRound();
+	}
+
+	/**
+	 * `GameStart` 배너를 띄운다. 배너가 사라진 뒤에야 보조 레이아웃이 나타난다.
+	 * 배너를 내리는 시점은 패널(`PuzzleBoardUIPanel.introSeconds`)이 정한다.
+	 */
+	private beginLevelIntro(): void {
+		this._presenter.beginIntro();
+	}
+
+	public pause(): void {
+		this.session.pause();
+		this._presenter.setInputEnabled(false);
+		// 허브의 일시정지 오버레이가 화면을 덮어야 하므로 보드를 내린다
+		PuzzleBoardStage.instance.unmount(this._presenter);
+	}
+
+	public resume(): void {
+		this.session.resume();
+		if (this.session.isActive === false) {
+			// 일시정지 상태가 아니었다 - 세션이 무시했으므로 보드도 그대로 둔다
+			return;
+		}
+		PuzzleBoardStage.instance.mount(this._presenter);
+		this._presenter.setInputEnabled(true);
+	}
+
+	public abort(): void {
+		this.session.abort();
+		this._presenter.setInputEnabled(false);
+		PuzzleBoardStage.instance.unmount(this._presenter);
+		this.releaseInteraction();
+	}
+
+	//#endregion
+
+	//#region Presentation (세션 이벤트 -> 보드 프레젠터)
+
+	private subscribeToSessionEvents(): void {
+		this.events.LEVEL_LOADED.subscribe(this.onLevelLoaded.bind(this));
+
+		// 경로가 한 칸 늘거나 줄 때마다 보드를 다시 칠한다. 49칸뿐이고 프레젠터가
+		// 실제로 바뀐 칸만 이벤트로 내보내므로, 칸별 부분 갱신을 손으로 짜는 것보다 안전하다.
+		this.events.DRAW_BEGAN.subscribe(() => this.applyGridVisuals());
+		this.events.NODE_LIT.subscribe(() => this.applyGridVisuals());
+		this.events.NODE_UNLIT.subscribe(() => this.applyGridVisuals());
+		this.events.DRAW_ENDED.subscribe(() => this.applyGridVisuals());
+
+		// **경로 완성/끊김은 로그로 남기지 않는다.** 선을 그리는 동안 두 이벤트가 번갈아
+		// 수십 번 오는데, Horizon 의 `console.log` 는 그 빈도로 부르면 드래그가 끊겨 보인다.
+		// 완성 여부는 전구 색과 테두리가 이미 실시간으로 알려 준다 (worker/NextJob.md 1번).
+
+		this.events.QUEST_CLEAR.subscribe(this.onQuestEnd.bind(this));
+		this.events.QUEST_FAILED.subscribe(this.onQuestEnd.bind(this));
+	}
+
+	private onLevelLoaded(level: FlowLevel): void {
+		// 이 판에 쓰인 색부터 A, B, C ... 를 붙인다 - 짝을 글자로 찾을 수 있게 한다
+		this._pairLabels = assignFlowPairLabels(level.nodes);
+		this.applyGridVisuals();
+
+		PuzzleBoardStage.instance.mount(this._presenter);
+		this._presenter.setInputEnabled(true);
+
+		console.log(`[FlowCoreAPI] Level loaded: ${level.nodes.length} objects, ${level.colorCount} colors.`);
+	}
+
+	private onQuestEnd(result: FlowResultData): void {
+		// 허브의 결과 화면이 화면을 덮어야 하므로 보드를 내린다.
+		// BoardPanel 과 HubPanel 은 서로 다른 gizmo 라 z-order 를 코드가 정할 수 없다.
+		// 한 번에 하나만 그리게 두면 어느 쪽이 위든 결과 화면이 확실히 보인다.
+		this._presenter.setInputEnabled(false);
+		PuzzleBoardStage.instance.unmount(this._presenter);
+		console.log(`[FlowCoreAPI] Quest ended: ${result.result} `
+			+ `(${result.remainingTimeSeconds}s remaining, ${result.remainingSubCount} objects unlit)`);
+	}
+
+	/** 전체 격자를 현재 배치와 경로로 다시 칠한다 */
+	/**
+	 * 색 -> 짝 글자. 레벨이 열릴 때 **판에 나온 순서**로 채운다.
+	 * 비어 있으면 글자를 그리지 않는다 (레벨을 아직 열지 않은 상태).
+	 */
+	private _pairLabels: Map<string, string> = new Map();
+
+	private applyGridVisuals(): void {
+		const board = this.session.board;
+		if (board === undefined) {
+			return;
+		}
+
+		// 지금 그리는 중인 경로의 머리 - 어디까지 왔는지 테두리로 알린다
+		const drawingColor = this.session.dragController?.drawingColor;
+		const head = drawingColor === undefined ? undefined : board.getPathHead(drawingColor);
+
+		for (let row = 0; row < FLOW_GRID_SIZE; row++) {
+			for (let col = 0; col < FLOW_GRID_SIZE; col++) {
+				const cell = row * FLOW_GRID_SIZE + col;
+				const node = board.hasTile(row, col) ? board.getNode(row, col) : undefined;
+
+				// 타일이 없거나 오브젝트가 없는 칸은 경로가 지나갈 수 없다 (canExtend 의 NO_TILE).
+				// 그리지 않으면 눌리지도 않으므로 잘못된 시작점을 잡을 수 없다.
+				if (node === undefined) {
+					this._presenter.setCell(cell, { isVisible: false, texture: NO_TEXTURE, label: '', accent: EBoardCellAccent.NONE });
+					continue;
+				}
+
+				const isHead = head !== undefined && head.row === row && head.col === col;
+				const isMain = node.kind === ENodeKind.MAIN;
+				// 이 칸이 어느 색 경로의 **마지막 칸**(머리)인지 - 그리다 만 선은 여기서만 이어진다
+				const pathHead = node.color === undefined || isMain
+					? undefined
+					: board.getPathHead(node.color);
+				const isAnyPathHead = pathHead !== undefined && pathHead.row === row && pathHead.col === col;
+
+				this._presenter.setCell(cell, {
+					isVisible: true,
+					// 인터랙션 규격: 선 긋기를 **시작**할 수 있는 곳만 만질 수 있다 -
+					// 색이 들어온 전구(메인)와, 그리다 만 경로의 머리. 빈 칸과 경로의
+					// 몸통은 정적이다 (드래그가 그 위를 지나가는 것은 hover 라 막히지 않는다).
+					isInteractive: isMain || isAnyPathHead,
+					fill: this.getNodeColor(node.color, isMain),
+					// 전구(메인) / 선이 지나간 칸 / 아직 빈 칸 셋을 구분해 그림을 고른다
+					texture: isMain
+						? (node.role === ENodeRole.START ? TEXTURE_NODE_START : TEXTURE_NODE_END)
+						: (node.color === undefined ? TEXTURE_EMPTY : TEXTURE_PATH),
+					// 짝 글자를 전구에만 얹는다. 두 전구가 같은 글자를 달고 있어 짝이 보이고,
+					// 출발 지점에는 `*` 가 하나 더 붙어 어디서 그리기 시작할지 알 수 있다.
+					// 선이 지나간 칸에는 글자를 붙이지 않는다 - 붙이면 판이 글자로 뒤덮인다.
+					label: getFlowNodeLabel(node, this._pairLabels),
+					labelColor: COLOR_NODE_LABEL,
+					// §4 - 전구를 테두리로 알린다. **머리에는 테두리를 주지 않는다** -
+					// 예전에는 둘이 같은 테두리를 써서 그리다 만 선 끝이 전구처럼 보였다.
+					// 머리는 아래의 `GRABBED` 로 떠오르고 빛나므로 그것만으로 충분히 구분된다.
+					isHighlighted: isMain,
+					// 지금 그리고 있는 머리는 떠올라 빛난다 - 선이 손가락 끝을 따라오는 것이 보인다.
+					// 손가락이 머리를 가려도 커진 만큼 밖으로 삐져나와 어디까지 그렸는지 알 수 있다.
+					accent: isHead ? EBoardCellAccent.GRABBED : EBoardCellAccent.NONE,
+				});
+			}
+		}
+	}
+
+	/**
+	 * 오브젝트 색.
+	 * 메인은 자기 색 그대로, 경로가 지나간 서브는 같은 색을 어둡게 해서 출발/도착이 도드라지게 한다.
+	 */
+	private getNodeColor(color: EFlowColor | undefined, isMain: boolean): PuzzleBoardColor {
+		if (color === undefined) {
+			return COLOR_UNLIT_SUB;
+		}
+		const base = FLOW_COLORS[color] ?? COLOR_UNLIT_SUB;
+		if (isMain) {
+			return base;
+		}
+		return boardColor(base.r * SUB_TONE_SCALE, base.g * SUB_TONE_SCALE, base.b * SUB_TONE_SCALE);
+	}
+
+	//#endregion
+}
+
+function toRow(cell: number): number {
+	return Math.floor(cell / FLOW_GRID_SIZE);
+}
+
+function toCol(cell: number): number {
+	return cell % FLOW_GRID_SIZE;
+}
+
+Component.register(FlowCoreAPI);

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Force | Select-Object Name, Mode; Get-ChildItem -Recurse -Directory -Depth 2 | Where-Object { $_.Name -match 'doc|문서' } | Select-Object FullName)"
+    ]
+  }
+}
