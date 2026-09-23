@@ -542,6 +542,25 @@ function testInputController(recorder: TestRecorder): void {
 	// 다운 없이 업
 	recorder.check('다운 없는 업은 거절', input.touchUp().rejection === ESwitchRejection.NO_ACTIVE_TOUCH);
 
+	// --- 뗀 자리를 표현 계층이 알려 준 경우 (인월드 "터치해도 색이 안 바뀐다" 회귀) ---
+	//
+	// 모바일 Pressable 은 손가락이 떨어질 때 exit 를 release 보다 먼저 보내는 경우가 있어,
+	// 제자리 탭에도 touchMove(-1) 이 먼저 도착한다. 프레젠터가 판정한 뗀 칸을 넘기면
+	// 그 -1 을 덮어쓰고 탭이 확정된다.
+	const beforeLateExit = board.grid.join(',');
+	input.touchDown(toPosition(2, 2));
+	input.touchMove(-1);   // 떼기 직전에 도착한 exit
+	const recovered = input.touchUp(toPosition(2, 2));
+	recorder.check('뗀 칸을 넘기면 늦게 온 exit 를 덮어쓴다', recovered.outcome === ESwitchPressOutcome.PRESSED);
+	recorder.check('덮어쓴 탭은 격자를 바꾼다', board.grid.join(',') !== beforeLateExit);
+
+	// 반대 방향 - 프레젠터가 "판 밖" 이라고 하면 드래그 기록이 무엇이든 취소된다
+	const beforeOutside = board.grid.join(',');
+	input.touchDown(toPosition(2, 2));
+	const outside = input.touchUp(-1);
+	recorder.check('넘어온 뗀 자리가 판 밖이면 취소', outside.rejection === ESwitchRejection.RELEASED_OUTSIDE);
+	recorder.check('취소 시 격자 불변 (넘어온 판 밖)', board.grid.join(',') === beforeOutside);
+
 	// 같은 프레임 다중 입력 - 타임스탬프 빠른 하나만 (PUZ_00 §8.1)
 	const board2 = new SwitchBoard(createFullGrid(ESwitchCellState.UNPRESSED), MASK_PLUS, 0, 0);
 	const input2 = new SwitchInputController(board2);

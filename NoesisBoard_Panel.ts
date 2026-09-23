@@ -127,12 +127,6 @@ const SNAP_TWEEN_MS = 90;
 const SNAP_TWEEN_STEP_MS = 16;
 const NO_PIECE = -1;
 /**
- * Move 한 번에 건너뛸 수 있다고 보는 최대 칸 수. 이보다 큰 튐은 손가락이 아니라 다른 기준으로 온 좌표
- * (뗄 때 딸려 오는 Move)로 보고 버린다 (`onPointerMove`). 화면을 한 번에 긋는 빠른 스와이프도 이벤트당 한 칸 남짓이다.
- */
-const MOVE_MAX_JUMP_CELLS = 3;
-
-/**
  * 트레이가 차지하는 자리 - **화면 대비 비율**이다. PuzzleBoard.xaml 의 star 값에서 나온다
  * (보조 영역 행 x 안쪽 84% x 76%, 가로 94% x 트레이 열). 생성기의 값을 바꾸면 같이 바꾼다.
  *
@@ -243,7 +237,19 @@ export class NoesisBoardPanel extends Component<typeof NoesisBoardPanel> {
 	private _boardY: number = 0;
 	private _boardSize: number = 0;
 	private _dragPiece: number = NO_PIECE;
+	/**
+	 * 이 드래그를 몰고 있는 입력원 (`mouse` / `touch`).
+	 *
+	 * 터치 한 번이 마우스로도 승격되어 두 벌로 오므로 한 벌만 받는다. 다만 **어느 벌이 오는지는
+	 * 기기가 정한다** - Down 은 `PreviewTouchDown` 으로 오고 Move 는 `MouseMove` 로만 오는 조합이
+	 * 실제로 있다. 그래서 잠금은 고정이 아니라 `_dragMoveCount` 가 0 인 동안에만 갈아탈 수 있다
+	 * (`onPointerMove`).
+	 */
 	private _dragSource: string = '';
+	/** 지금 잠긴 입력원에서 받아들인 Move 수 - 0 이면 아직 잠금을 갈아탈 수 있다 */
+	private _dragMoveCount: number = 0;
+	/** 입력원·종류별로 처음 받은 이벤트 인자의 모양 - 좌표를 못 읽을 때 기기 로그로 확인한다 */
+	private readonly _argShapes: { [kind: string]: string } = {};
 	private _lastGridRow: number = 0;
 	private _lastGridCol: number = 0;
 	private readonly _tweens: { [slot: number]: number } = {};
@@ -920,27 +926,37 @@ export class NoesisBoardPanel extends Component<typeof NoesisBoardPanel> {
 	 * 트레이에서 집은 부품은 어디에 놓든 뗌이 트레이(보조 영역)에서 올라와 매번 인벤토리로 되돌아갔다.
 	 * 손가락이 어디 있는지는 Enter / Leave 로만 좇고, 놓을 칸은 프레젠터가 그 기록에서 정한다.
 	 */
-	private onPointerUp(_args: unknown, source: string): void {
+	private onPointerUp(args: unknown, source: string): void {
+		const point = this.readPoint(args, `${source}Up`);
 		if (this._dragPiece === NO_PIECE) {
 			this._presenter?.pointerUp();
 			return;
 		}
-		// 터치가 마우스로도 승격되어 뗌이 두 번 온다 - 이 드래그를 몰던 입력원의 뗌만 받는다
-		if (source !== this._dragSource) {
-			return;
-		}
-		// **뗌은 "놓았다" 는 신호일 뿐이다 - Up 인자의 좌표는 읽지 않고, 놓는 자리는 마지막으로 받아들인 Move 다.**
+		// **뗌은 어느 입력원에서 오든 받는다 - 먼저 도착한 쪽이 이 드래그를 마감한다.**
 		//
-		// 모바일 실기(2026-09-23)에서 격자 안에서 손가락을 떼면 조각이 원래 자리로 돌아갔는데, 격자 밖에서 떼거나
-		// 뗀 손가락을 그대로 둔 채 다른 손가락으로 화면을 건드리면 **지금 자리에 놓였다.** 후자의 경로는 Focused
-		// Interaction 의 뗌 안전망(`onStreamRelease` -> `pointerUp` -> `onPieceCancel`)이라 좌표를 새로 넣지 않고
-		// 컨트롤러가 마지막 Move 까지 반영해 둔 값으로 바로 확정한다. 즉 컨트롤러의 값은 뗄 때까지 맞고, 뗄 때
-		// Noesis 가 주는 좌표(격자 안의 칸 위에서 올라온 Up 인자)가 Move 와 다른 기준이었다. 그 값을 넣으면 잡은
-		// 지점 대비 delta 가 크게 어긋나 이동 범위의 끝으로 잘리고, 러시아워는 대개 한쪽이 막혀 있어 그 끝이 곧
-		// 원래 자리다. 그래서 정상 뗌도 안전망과 같은 경로로 확정한다 (`RushHourCoreAPI.onPieceDrop` 은 좌표를
-		// 다시 넣지 않는다). 실기에서 검증된 `NoesisMoveLab` 도 Up 의 좌표를 읽지 않는다. Move 는 입력 해상도로
-		// 오므로 마지막 Move 와 실제로 뗀 자리의 차이는 몇 px 안이다.
+		// 터치가 마우스로도 승격되어 뗌이 두 벌 오지만, 두 번째는 `_dragPiece` 가 이미 비어 있어
+		// 위에서 걸린다. 예전처럼 "이 드래그를 몰던 입력원의 뗌만" 받으면, Down 과 Up 이 서로 다른
+		// 벌로 오는 기기에서 **아무도 드래그를 닫지 않아** 조각이 붙잡힌 채 남고 다음 터치가
+		// 유실 회복(`PuzzleBoardPresenter.pointerUp`)으로 마감된다 - 손을 떼도 안 놓이는 증상이다.
+		// **놓는 자리는 마지막 Move 의 좌표다 - Up 인자의 좌표는 쓰지 않는다.**
+		//
+		// 실기(2026-09-23)에서 Up 인자의 좌표는 Move 와 다른 기준으로 왔다. 그 값을 그대로 컨트롤러에
+		// 넣으면 잡은 지점 대비 delta 가 어긋나, 손을 떼는 순간 조각이 **드래그 내내 보여 주던 칸과
+		// 다른 칸**으로 간다 - 크게 어긋나면 이동 범위의 끝(= 대개 원래 자리)으로 잘리고, 조금만
+		// 어긋나도 절반 근처에서는 스냅 판정이 그대로 뒤집힌다. "블록이 절반을 넘겼는지가 기준이
+		// 아닌 것 같다" 는 신고가 여기서 나왔다.
+		//
+		// 한 칸 안쪽이면 채택하는 타협도 두지 않는다 - 절반 판정을 뒤집는 데는 한 칸이 필요 없다.
+		// 실기에서 검증된 `NoesisMoveLab` 도 같은 이유로 Up 의 좌표를 읽지 않는다. Move 는 입력
+		// 해상도로 오므로 마지막 Move 와 실제로 뗀 자리의 차이는 몇 px 안이다.
+		if (this.props.logToConsole === true) {
+			this.trace(`up source=${source} lock=${this._dragSource} moves=${this._dragMoveCount} slot=${this._dragPiece} `
+				+ `dropGrid=(${this._lastGridRow.toFixed(2)},${this._lastGridCol.toFixed(2)}) `
+				+ `upPx=${point === undefined ? 'none' : `(${point.x.toFixed(1)},${point.y.toFixed(1)})`} (unused) `
+				+ `board=(${this._boardX.toFixed(1)},${this._boardY.toFixed(1)},${this._boardSize.toFixed(1)})`);
+		}
 		this._dragPiece = NO_PIECE;
+		this._dragMoveCount = 0;
 		this._presenter?.pieceDrop(this._lastGridRow, this._lastGridCol);
 	}
 
@@ -949,7 +965,7 @@ export class NoesisBoardPanel extends Component<typeof NoesisBoardPanel> {
 	 * 조각 드래그가 되고, 없으면 아무것도 하지 않는다 (칸의 자기 Down 이 뒤따라 칸 경로를 탄다).
 	 */
 	private onPointerDown(args: unknown, source: string): void {
-		const point = this.readPoint(args);
+		const point = this.readPoint(args, `${source}Down`);
 		const presenter = this._presenter;
 		if (point === undefined || presenter === undefined || this._pieceCount <= 0 || this._cellSize <= 0) {
 			return;
@@ -957,7 +973,13 @@ export class NoesisBoardPanel extends Component<typeof NoesisBoardPanel> {
 		if (this._dragPiece !== NO_PIECE) {
 			return;
 		}
-		this.toGridPoint(point);
+		if (this.toGridPoint(point) === false) {
+			// 보드 사각형을 아직 모른다 - 루트 크기가 오지 않았다는 뜻이다 (XAML 의 root-size 트리거).
+			// 옛 좌표로 아무 조각이나 집는 대신 이 누름을 버린다. 크기는 이 누름과 함께 오므로
+			// 다음 누름부터는 정상이다.
+			this.trace(`down ignored - board rect unknown (root=${this._rootWidth.toFixed(0)}x${this._rootHeight.toFixed(0)})`);
+			return;
+		}
 		const slot = this.hitPiece(this._lastGridRow, this._lastGridCol);
 		if (slot === NO_PIECE) {
 			return;
@@ -968,41 +990,66 @@ export class NoesisBoardPanel extends Component<typeof NoesisBoardPanel> {
 		this.stopTween(slot);
 		this._dragPiece = slot;
 		this._dragSource = source;
+		this._dragMoveCount = 0;
 		// 같은 누름이 조각 밑 칸의 Down 으로 또 오는 것을 중복으로 거른다
 		this._lastDownKey = 'piece';
 		this._lastDownMs = Date.now();
 	}
 
+	/**
+	 * 끌고 있다 - **입력원 잠금은 첫 Move 를 받을 때까지만 잠정적이다.**
+	 *
+	 * 터치 한 번이 마우스로도 승격되므로 한 벌만 받아야 하는데, 기기에 따라 Down 은 터치로 오고
+	 * Move 는 마우스로만 오는 조합이 있다. 잠금을 고정하면 그 조합에서 **Move 가 전부 버려져**
+	 * 조각이 잡은 자리에 붙박이고, 뗄 때는 움직인 적이 없으니 원래 칸에 그대로 놓인다 -
+	 * "모바일에서만 드롭하면 제자리로 돌아간다" 의 정체다. 그래서 잠긴 쪽이 아직 한 번도
+	 * Move 를 주지 않았다면 새로 온 쪽으로 갈아탄다. 한 번이라도 받은 뒤에는 갈아타지 않는다 -
+	 * 두 벌이 모두 흐르는 기기에서 좌표가 섞이면 조각이 떨린다.
+	 */
 	private onPointerMove(args: unknown, source: string): void {
-		if (this._dragPiece === NO_PIECE || source !== this._dragSource) {
+		if (this._dragPiece === NO_PIECE) {
 			return;
 		}
-		const point = this.readPoint(args);
+		if (source !== this._dragSource) {
+			if (this._dragMoveCount > 0) {
+				return;
+			}
+			this.trace(`move source switched ${this._dragSource} -> ${source} (no move from the locked source yet)`);
+			this._dragSource = source;
+		}
+		const point = this.readPoint(args, `${source}Move`);
 		if (point === undefined) {
 			return;
 		}
-		// 튐 검사 - 다른 기준으로 온 좌표를 거른다 (`onPointerUp` 주석). 루트 밖의 px 좌표이거나, 직전에
-		// 받아들인 Move 에서 한 이벤트 만에 몇 칸을 건너뛴 좌표는 손가락이 아니다. 손가락은 화면 밖으로 나갈 수
-		// 없고, 화면 전체를 한 번에 긋는 빠른 스와이프도 이벤트당 한 칸 남짓이다. 거른 Move 는 없던 것으로 하고
-		// 직전 자리를 유지한다 - 조각은 컨트롤러가 마지막으로 받은 자리에 남는다.
-		const grid = this.gridPointOf(point);
-		if (grid === undefined) {
+		if (this.toGridPoint(point) === false) {
 			return;
 		}
-		const isOutsideRoot = this._rootWidth > 0 && this._rootHeight > 0
-			&& (point.x < 0 || point.y < 0 || point.x > this._rootWidth || point.y > this._rootHeight);
-		const isJump = Math.abs(grid.row - this._lastGridRow) > MOVE_MAX_JUMP_CELLS
-			|| Math.abs(grid.col - this._lastGridCol) > MOVE_MAX_JUMP_CELLS;
-		if (isOutsideRoot || isJump) {
-			return;
-		}
-		this._lastGridRow = grid.row;
-		this._lastGridCol = grid.col;
+		// 좌표까지 읽어낸 Move 만 센다 - 잠금을 갈아탈지 정하는 값이라 "왔지만 못 쓴" Move 는 0 이어야 한다
+		this._dragMoveCount++;
 		this._presenter?.pieceDrag(this._lastGridRow, this._lastGridCol);
 	}
 
-	/** 이벤트 인자의 좌표 - 문서의 MouseMove 예제는 `{ position: { x, y } }` 다. 터치는 이름이 다를 수 있어 몇 가지를 본다 */
-	private readPoint(args: unknown): { x: number; y: number } | undefined {
+	/**
+	 * 이벤트 인자의 좌표 - 문서의 MouseMove 예제는 `{ position: { x, y } }` 다. 터치는 이름이 다를 수 있어 몇 가지를 본다.
+	 *
+	 * **종류별 첫 인자는 모양을 그대로 찍는다** (`kind` = `mouseDown`·`touchMove`…). PC 와 모바일에서
+	 * 인자의 모양이나 좌표의 기준이 다른지는 인월드 로그로만 확인할 수 있고, 좌표를 못 읽으면
+	 * (`undefined`) 드래그가 아예 열리지 않아 "모바일에서 동작하지 않는다" 로 보인다.
+	 * `NoesisMoveLab_Panel.readPoint` 와 같은 진단이다.
+	 */
+	private readPoint(args: unknown, kind: string): { x: number; y: number } | undefined {
+		if (this._argShapes[kind] === undefined) {
+			let text = '';
+			try {
+				text = JSON.stringify(args);
+			} catch (error) {
+				text = `unserializable ${typeof args}`;
+			}
+			this._argShapes[kind] = (text === undefined ? String(args) : text).slice(0, 200);
+			this.trace(`first ${kind} args: ${this._argShapes[kind]} `
+				+ `root=(${this._rootWidth.toFixed(0)}x${this._rootHeight.toFixed(0)}) `
+				+ `board=(${this._boardX.toFixed(1)},${this._boardY.toFixed(1)},${this._boardSize.toFixed(1)})`);
+		}
 		if (typeof args !== 'object' || args === null) {
 			return undefined;
 		}
@@ -1019,27 +1066,23 @@ export class NoesisBoardPanel extends Component<typeof NoesisBoardPanel> {
 		return undefined;
 	}
 
-	/** 루트 px → 보드 px → 900 설계 좌표 → 격자 좌표(실수). 결과는 `_lastGridRow/Col` 에 남는다 */
-	private toGridPoint(point: { x: number; y: number }): void {
-		const grid = this.gridPointOf(point);
-		if (grid === undefined) {
-			return;
-		}
-		this._lastGridRow = grid.row;
-		this._lastGridCol = grid.col;
-	}
-
-	/** `toGridPoint` 의 순수 계산 - 자리에 쓰지 않고 값만 돌려준다. 보드 크기를 아직 모르면 undefined */
-	private gridPointOf(point: { x: number; y: number }): { row: number; col: number } | undefined {
+	/**
+	 * 루트 px → 보드 px → 900 설계 좌표 → 격자 좌표(실수). 결과는 `_lastGridRow/Col` 에 남는다.
+	 *
+	 * **보드 사각형을 아직 모르면 false 다.** 예전에는 그냥 돌아갔는데, 그러면 `_lastGridRow/Col` 에
+	 * 직전 값(첫 터치라면 0,0)이 남아 호출부가 그것을 진짜 좌표로 읽는다. 루트 크기는 `Loaded` 가
+	 * dataContext 보다 먼저 오면 유실될 수 있고 그때는 보드 사각형이 0 이라, 조용히 넘기면
+	 * "그 기기에서만 잡히지 않는다" 로 나타난다.
+	 */
+	private toGridPoint(point: { x: number; y: number }): boolean {
 		if (this._boardSize <= 0 || this._cellSize <= 0) {
-			return undefined;
+			return false;
 		}
 		const designX = (point.x - this._boardX) / this._boardSize * BOARD_DESIGN_SIZE;
 		const designY = (point.y - this._boardY) / this._boardSize * BOARD_DESIGN_SIZE;
-		return {
-			row: (designY - this._gridTop) / this._cellSize,
-			col: (designX - this._gridLeft) / this._cellSize,
-		};
+		this._lastGridCol = (designX - this._gridLeft) / this._cellSize;
+		this._lastGridRow = (designY - this._gridTop) / this._cellSize;
+		return true;
 	}
 
 	/** 이 격자 좌표 위에 있는 조각 - 나중에 그려진(위에 있는) 것부터 본다 */

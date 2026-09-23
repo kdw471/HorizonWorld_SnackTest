@@ -25,6 +25,7 @@ import {
 	getDirectionTowardsEdge,
 	getFlushAxisValue,
 	getPieceCells,
+	snapAxisValueToCell,
 } from 'RushHour_Definitions';
 
 //#region Types
@@ -326,7 +327,9 @@ export class RushHourDragController {
 
 		let move: RushHourMove | undefined = undefined;
 		if (didDock === false && this._board.isDocked(pieceId) === false) {
-			move = this.snapPieceToAxisValue(pieceId, axis, Math.round(value));
+			// §7 - 화면에 그려져 있던 그 자리(`_currentValue`)의 겹침으로만 판정한다.
+			// 뗄 때 들어오는 좌표를 한 번 더 반영하지 않는 이유는 `RushHourCoreAPI.onPieceDrop` 에 있다.
+			move = this.snapPieceToAxisValue(pieceId, axis, snapAxisValueToCell(value));
 
 			// **도착 포인트에 닿기만 해도 꽂힌다.**
 			// 슬롯 쪽으로 반 칸 더 미는 조작(§9)은 판 밖의 테두리 칸을 짚어야 해서

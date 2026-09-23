@@ -199,10 +199,19 @@ ${triggers('\t\t\t\t', [['MouseLeftButtonDown', 'OnDown'], ['TouchDown', 'OnDown
 	  finger, so where the finger is at that moment is never read from this event; the script tracks
 	  it from Enter / Leave instead.
 	  The root size goes to the script for the bar font and the tray arrangement (Loaded can come
-	  before the dataContext, so the first press sends it again).
+	  before the dataContext, so the first press sends it again). The re-send MUST sit on the touch
+	  press as well as the mouse press: on mobile the mouse press never fires, so a mouse-only
+	  re-send leaves the script with no root size, no board rect, and no way to turn pointer pixels
+	  into grid coordinates - the grab then misses every piece.
 	-->
 	<b:Interaction.Triggers>
-${pointerTriggers('\t\t')}
+		<!--
+		  Root size FIRST, pointer handlers after. Both blocks answer PreviewMouseLeftButtonDown /
+		  PreviewTouchDown, and triggers run in document order - so putting the size ahead means the
+		  script already knows the board rect when the press handler runs and can tell which piece was
+		  grabbed. The other way round, the very first press on a device whose Loaded fired before the
+		  dataContext is resolved against a board rect of zero and grabs nothing.
+		-->
 		<b:EventTrigger EventName="Loaded">
 ${rootSize('\t\t\t')}
 		</b:EventTrigger>
@@ -212,6 +221,10 @@ ${rootSize('\t\t\t')}
 		<b:EventTrigger EventName="PreviewMouseLeftButtonDown">
 ${rootSize('\t\t\t')}
 		</b:EventTrigger>
+		<b:EventTrigger EventName="PreviewTouchDown">
+${rootSize('\t\t\t')}
+		</b:EventTrigger>
+${pointerTriggers('\t\t')}
 	</b:Interaction.Triggers>
 
 	<Grid.RowDefinitions>

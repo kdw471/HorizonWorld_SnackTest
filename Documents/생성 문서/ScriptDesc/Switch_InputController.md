@@ -116,12 +116,23 @@ M3 - 연출(0.4초)·완성 후에는 다운 자체를 받지 않는다.
 
  터치 유지 중 이동. 진행 중인 터치가 없으면 무시한다
 
-## `public touchUp(): SwitchPressResult {`
+## `public touchUp(releasedPosition?: number): SwitchPressResult {`
 
 > 원본 L92
 
 터치 업. **다운했던 키 캡 위에서 뗀 경우에만** 눌림을 확정한다.
 밖에서 떼면 RELEASED_OUTSIDE 로 취소된다 - §7 부분 누름 미반응의 모바일 대체.
+
+`releasedPosition` 은 **표현 계층이 판정한 뗀 자리**다. 주면 그것이 진실이고,
+드래그 중 기록해 둔 위치를 덮어쓴다. 주지 않으면 예전처럼 마지막 `touchMove()` 를 쓴다.
+
+이 인자가 필요한 이유는 모바일 `Pressable` 의 이벤트 순서 때문이다. 손가락이 떨어질 때
+`onExit` 가 `onRelease` 보다 먼저 오는 경우가 있어서, 그냥 탭 한 번에도
+"칸 밖으로 나갔다(`touchMove(-1)`) → 뗐다" 순으로 신호가 들어온다. 그 -1 을 믿으면
+**제자리 탭이 전부 RELEASED_OUTSIDE 로 취소된다**
+(`../구현 사항/버그수정_2026-09-23_스위치_터치_무반응.md`).
+프레젠터는 마지막으로 올라가 있던 진짜 칸을 따로 기억해 두었다가 뗄 때 돌려주므로,
+어댑터는 그 값을 그대로 넘기면 된다.
 
 ## `public cancelActiveTouch(): void {`
 

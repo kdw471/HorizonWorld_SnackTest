@@ -241,7 +241,16 @@ export class SwitchCoreAPI extends Component<typeof SwitchCoreAPI> {
 				onCellDown: (cell) => { this.session.touchDown(cell); },
 				// 보드 밖으로 나가면 -1 이 온다 -> "다운한 칸 밖" 이 되어 뗄 때 취소된다
 				onCellMove: (cell) => { this.session.touchMove(cell); },
-				onCellUp: () => { this.session.touchUp(); },
+				// **뗀 칸을 반드시 그대로 넘긴다.** 프레젠터가 준 이 값이 뗀 자리의 진실이다.
+				//
+				// 버리고 `touchUp()` 만 부르면 세션은 마지막 `onCellMove` 를 보는데, 모바일
+				// `Pressable` 은 손가락이 떨어질 때 `onExit` 를 `onRelease` 보다 먼저 보내는
+				// 경우가 있어 제자리 탭에도 `onCellMove(-1)` 이 먼저 도착한다. 그러면 모든 탭이
+				// RELEASED_OUTSIDE 로 취소되어 **키 캡 색이 전혀 바뀌지 않았다.**
+				// 프레젠터는 스쳐 가는 exit 에 지워지지 않는 "마지막 진짜 칸" 을 따로 기억해
+				// 여기로 돌려준다 (`버그수정_2026-09-02_드래그_놓기_판정_실패.md`).
+				// 판을 진짜로 벗어났거나 누름이 취소된 경우에는 이 값도 -1 이라 취소가 유지된다.
+				onCellUp: (cell) => { this.session.touchUp(cell); },
 				// 보조 레이아웃의 Reset 버튼 - 판만 되돌리고 남은 시간은 그대로 둔다
 				onReset: () => { this.resetLevel(); },
 			},

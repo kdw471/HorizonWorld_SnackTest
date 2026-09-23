@@ -396,12 +396,18 @@ export class SwitchSession {
 		this._input?.touchMove(position);
 	}
 
-	/** 터치 업 - 다운했던 키 캡 위에서 뗀 경우에만 눌림 확정 */
-	public touchUp(): SwitchPressResult | undefined {
+	/**
+	 * 터치 업 - 다운했던 키 캡 위에서 뗀 경우에만 눌림 확정.
+	 *
+	 * `releasedPosition` 은 표현 계층이 판정한 뗀 자리다. 어댑터가 알면 반드시 넘긴다 -
+	 * 뗄 때 먼저 도착하는 `onExit` 때문에 `touchMove()` 가 이미 "밖"(-1)으로 밀려 있을 수
+	 * 있기 때문이다 (`SwitchInputController.touchUp()` 주석 참고).
+	 */
+	public touchUp(releasedPosition?: number): SwitchPressResult | undefined {
 		if (this.isActive === false || this._input === undefined) {
 			return undefined;
 		}
-		return this.applyPressResult(this._input.touchUp());
+		return this.applyPressResult(this._input.touchUp(releasedPosition));
 	}
 
 	/** 같은 프레임의 입력을 모은다 - PUZ_00 §8.1 */

@@ -103,7 +103,7 @@ Focused Interaction 스트림은 뗌 안전망으로만 남는다. **Custom UI �
 | 칸 `MouseLeave` / `TouchLeave` | `onCellLeave` | `pointerExit(cell)` |
 | 루트 `PreviewMouseLeftButtonDown` / `PreviewTouchDown` (인자째) | `onPointerDown` | 조각을 맞히면 `pieceGrab(slot, row, col)`. 아니면 아무것도 안 한다 (칸의 자기 Down 이 뒤따른다) |
 | 루트 `MouseMove` / `TouchMove` (인자째) | `onPointerMove` | `pieceDrag(row, col)` — 조각 드래그 중일 때만 |
-| 루트 `MouseLeftButtonUp` / `TouchUp` (인자째) | `onPointerUp` | 조각 드래그 중이면 **마지막으로 받아들인 Move 의 좌표**로 `pieceDrop(row, col)`, 아니면 `pointerUp()` — 여러 번 와도 한 번만 일한다. Up 인자의 좌표는 읽지 않는다 (아래 "Up 의 좌표") |
+| 루트 `MouseLeftButtonUp` / `TouchUp` (인자째) | `onPointerUp` | 조각 드래그 중이면 `pieceDrop(row, col)`, 아니면 `pointerUp()` — 여러 번 와도 한 번만 일한다 |
 | 보조 영역 `MouseEnter` / `TouchEnter` | `onAuxAreaEnter` | `pointerLeaveBoard()` — 누른 채 보조 영역에 들어오면 판을 벗어난 것. 여기서 떼면 판 밖에 놓은 것이 된다 |
 | 트레이 슬롯 `…Down` | `onItemDown` | `itemDown(item)` |
 | `Reset` / 액션 / `Menu` | | `requestReset()` / `requestAction()` / `requestPause()` |
@@ -113,24 +113,6 @@ Focused Interaction 스트림은 뗌 안전망으로만 남는다. **Custom UI �
 읽었는데, 트레이에서 집은 부품은 어디에 놓든 뗌이 트레이(보조 영역)에서 올라와 **매번 인벤토리로 되돌아갔다**
 (2026-09-21 레이저 실기). 손가락이 어디 있는지는 Enter / Leave 로만 좇고, 놓을 칸은 프레젠터가 그 기록
 (`_hoverCell` / `_lastInsideCell`)에서 정한다.
-
-### Up 의 좌표 — 조각 드래그도 같은 이유로 마지막 Move 에 놓는다
-
-조각 계층은 처음에 Up 인자(`PassEventArgsToCommand`)의 좌표로 놓을 자리를 정했는데, 모바일 실기(2026-09-23)에서
-**격자 안에서 손가락을 떼면 조각이 원래 자리로 돌아갔다** (PC 는 정상). 결정적인 관찰이 둘 있었다 — **격자 밖에서
-떼면** 마지막 자리에 놓였고, 끌던 손가락을 그대로 둔 채 **다른 손가락으로 화면을 건드려도** 지금 자리에 놓였다.
-후자의 경로는 Focused Interaction 의 뗌 안전망(`onStreamRelease` → `pointerUp` → `onPieceCancel`)이라 좌표를 새로
-넣지 않고 컨트롤러가 마지막 Move 까지 반영해 둔 값으로 바로 확정한다. 즉 컨트롤러의 값은 뗄 때까지 맞고, 정상 뗌이
-놓는 순간 한 번 더 넣던 좌표 — **격자 안의 칸 위에서 올라온 Up 인자의 좌표가 Move 와 다른 기준**이었다. 그 값을
-넣으면 잡은 지점 대비 delta 가 크게 어긋나 이동 범위의 끝으로 잘리고, 러시아워는 대개 한쪽이 막혀 있어 그 끝이 곧
-원래 자리다. "마지막 Move 에서 한 칸 안이면 채택" 으로는 부족했다 — Up 좌표가 누른 지점으로 오면 한 칸 드래그는
-그 검사를 통과한다.
-
-지금은 **정상 뗌도 안전망과 같은 경로**다. 패널은 Up 인자의 좌표를 읽지 않고 마지막으로 받아들인 Move 의 격자
-좌표를 넘기며, `RushHourCoreAPI.onPieceDrop` 은 그 좌표를 다시 넣지 않고(`onPieceCancel` 과 같이) 확정만 한다.
-다른 기준으로 온 Move 는 `onPointerMove` 의 튐 검사가 거른다 — 루트 밖의 px 좌표이거나 직전 Move 에서 한 이벤트
-만에 `MOVE_MAX_JUMP_CELLS`(3칸)보다 멀리 뛴 좌표는 버리고 직전 자리를 유지한다. 실기에서 검증된 `NoesisMoveLab` 도
-Up 의 좌표를 읽지 않는다.
 
 ### 트레이의 줄 수
 

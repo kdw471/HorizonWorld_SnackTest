@@ -225,6 +225,13 @@ Focused Interaction 도 필요 없다. 보드를 3D 공간의 한 자리에 고�
 예전 `PuzzleTouchRouter` 배선과 의미가 정확히 같다. 다른 점은 칸 번호를
 평면 교차로 구하지 않고 Pressable 이 그대로 준다는 것뿐이다.
 
+**`onCellUp` 이 받은 칸 번호를 반드시 `session.touchUp(cell)` 로 넘긴다.**
+버리고 `touchUp()` 만 부르면 세션은 마지막 `onCellMove` 를 뗀 자리로 보는데,
+모바일 `Pressable` 은 손가락이 떨어질 때 `onExit` 를 `onRelease` 보다 먼저 보내는
+경우가 있어 제자리 탭에도 `onCellMove(-1)` 이 먼저 도착한다. 그러면 모든 탭이
+RELEASED_OUTSIDE 로 취소되어 **키 캡 색이 전혀 바뀌지 않는다**
+(`../구현 사항/버그수정_2026-09-23_스위치_터치_무반응.md`).
+
 
 에디터 prop 의 텍스처 애셋을 키에 붙인다.
 

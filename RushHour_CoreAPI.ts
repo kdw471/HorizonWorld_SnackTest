@@ -65,6 +65,7 @@ import {
 	RushHourResultData,
 	getPieceCells,
 	isInsidePlayField,
+	snapAxisValueToCell,
 	toFullGridIndex,
 } from 'RushHour_Definitions';
 
@@ -388,6 +389,9 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		}
 		// 잡은 지점을 기준점으로 - 말이 "잡은 자리 그대로" 손가락에 붙어 따라온다
 		this.session.rebaseDragOrigin(localRow, localCol);
+		// [진단] 패널이 맞힌 슬롯과 컨트롤러가 고른 말이 같은지 - 반 칸 어긋남 확인용
+		console.log(`[RushHourCoreAPI][grab] panelSlot=${_piece} (${this._pieceSlots[_piece]}) -> controller=${piece.id} `
+			+ `at=(${piece.row},${piece.col}) ${piece.orientation} touchLocal=(${localRow.toFixed(2)},${localCol.toFixed(2)})`);
 		this._previewPieceId = piece.id;
 		this._previewRow = piece.row;
 		this._previewCol = piece.col;
@@ -411,19 +415,29 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	}
 
 	/**
-	 * 놓았다 - **좌표를 다시 넣지 않고** 마지막 Move 까지 반영된 자리에 확정한다 (`onPieceCancel` 과 같은 경로).
+	 * 놓았다 - **눈에 보이던 그 자리의 겹침으로만** 확정한다 (§7 절반 규칙).
 	 *
-	 * 모바일 실기(2026-09-23)에서 격자 안에서 손가락을 떼면 조각이 원래 자리로 돌아갔는데, 격자 밖에서 떼거나
-	 * 다른 손가락으로 화면을 건드려 뗌 안전망(`onStreamRelease` -> `onPieceCancel`)으로 닫히면 지금 자리에 놓였다.
-	 * 두 경로의 차이는 놓는 순간 좌표를 한 번 더 `trackDragToLocal` 에 넣느냐뿐이었다 - Noesis 가 뗄 때 주는
-	 * 좌표는 Move 와 기준이 달라 그 한 번이 조각을 되돌렸다. 패널이 넘기는 좌표는 마지막으로 받아들인 Move 라
-	 * 이미 반영돼 있으므로 받기만 하고 쓰지 않는다 (`NoesisBoardPanel.onPointerUp`).
+	 * 뗌이 알려 주는 좌표(`_row`/`_col`)는 받기만 하고 쓰지 않는다. 모바일 실기(2026-09-23)에서
+	 * Up 인자의 좌표는 Move 와 다른 기준으로 왔다 - 그 값을 컨트롤러에 한 번 더 넣으면 잡은 지점
+	 * 대비 delta 가 통째로 어긋나, 마지막 Move 까지 미리보기가 보여 주던 칸과 **다른 칸**에 조각이
+	 * 놓였다. "절반을 넘겼는데 안 넘어간다 / 안 넘겼는데 넘어간다" 로 보이던 것의 정체다.
+	 * 한 칸 안쪽의 작은 어긋남도 절반 근처에서는 판정을 뒤집으므로 "가까우면 채택" 같은 타협을
+	 * 두지 않는다. Move 는 입력 해상도로 오므로 마지막 Move 와 실제로 뗀 자리의 차이는 몇 px 안이다.
 	 */
 	private onPieceDrop(_row: number, _col: number): void {
 		if (this._previewPieceId === undefined) {
 			return;
 		}
+		const pieceId = this._previewPieceId;
+		// [진단] 미리보기가 보여 주던 자리와 확정된 보드 자리가 같은지 - 둘이 갈라지면 여기서 드러난다
+		console.log(`[RushHourCoreAPI][drop] piece=${pieceId} origin=(${this._originRow},${this._originCol}) `
+			+ `visual=(${this._dragVisualRow.toFixed(2)},${this._dragVisualCol.toFixed(2)}) `
+			+ `preview=(${this._previewRow},${this._previewCol})`);
+
 		this.finalizeDrag();
+		const landed = this.session.board?.getPiece(pieceId);
+		console.log(`[RushHourCoreAPI][drop] endDrag -> piece=${pieceId} board=(${landed?.row},${landed?.col}) `
+			+ `docked=${this.session.board?.isDocked(pieceId) === true}`);
 		this.applyPieceVisuals();
 	}
 
@@ -665,10 +679,11 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		// 조각 계층은 반올림 전의 연속 좌표로 그린다 (`syncDragPieceView`)
 		this._dragVisualRow = visual.row;
 		this._dragVisualCol = visual.col;
-		// §7 스냅과 같은 규칙으로 반올림한다. 컨트롤러가 이미 이동 가능 범위로 잘라 주므로
-		// 이 자리는 언제나 놓을 수 있는 자리다.
-		const row = Math.round(visual.row);
-		const col = Math.round(visual.col);
+		// §7 스냅과 **같은 함수**로 칸을 정한다 (`snapAxisValueToCell` - 절반 넘게 덮은 칸).
+		// 컨트롤러가 이미 이동 가능 범위로 잘라 주므로 이 자리는 언제나 놓을 수 있는 자리다.
+		// 미리보기와 확정이 같은 규칙이어야 손을 떼는 순간 조각이 다른 칸으로 뛰지 않는다.
+		const row = snapAxisValueToCell(visual.row);
+		const col = snapAxisValueToCell(visual.col);
 		if (row === this._previewRow && col === this._previewCol && visual.axis === this._dragAxis) {
 			return false;
 		}
@@ -1035,9 +1050,9 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 			});
 		}
 
-		// 집어 든 오브젝트가 원래 있던 자리 - 실루엣만 남긴다.
-		// 오브젝트보다 먼저 칠해 두어, 아직 원래 자리에 겹쳐 있는 칸은 아래에서 덮이게 한다.
-		this.applyGhostVisuals();
+		// **원래 자리의 실루엣(잔상)은 그리지 않는다.** 어디까지 갈 수 있는지는 파란 길
+		// (`applyDragPathVisuals`)이 이미 알려 주고, 원래 자리는 그 길의 일부라 실루엣이
+		// 겹쳐 봤자 같은 정보를 두 번 말하면서 판만 지저분해진다.
 
 		// 조각 계층이 켜지면 말은 칸에 칠하지 않는다 - 조각이 그 위에서 움직인다 (`applyPieceVisuals`)
 		if (this.props.pieceLayer === true) {
@@ -1064,37 +1079,6 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 					accent: isPreview ? EBoardCellAccent.GRABBED : EBoardCellAccent.NONE,
 				});
 			}
-		}
-	}
-
-	/**
-	 * 집어 든 오브젝트가 원래 있던 칸에 실루엣을 남긴다.
-	 *
-	 * 미리보기가 아직 원래 자리에 그대로 있으면 그리지 않는다 - 같은 칸을 실루엣과 본체가
-	 * 겹쳐 쓰면 집었다는 느낌 대신 색만 흐려진 것처럼 보인다.
-	 */
-	private applyGhostVisuals(): void {
-		const pieceId = this._previewPieceId;
-		if (pieceId === undefined) {
-			return;
-		}
-		if (this._previewRow === this._originRow && this._previewCol === this._originCol) {
-			return;
-		}
-
-		const piece = this.session.board?.getPiece(pieceId);
-		if (piece === undefined) {
-			return;
-		}
-
-		for (const cell of getPieceCells(withPosition(piece, this._originRow, this._originCol))) {
-			this.setFullGridCell(toFullGridIndex(cell.row), toFullGridIndex(cell.col), {
-				fill: this.getPieceColor(piece),
-				texture: piece.isGoal ? TEXTURE_GOAL_PIECE : TEXTURE_BLOCKER_PIECE,
-				label: '',
-				isHighlighted: false,
-				accent: EBoardCellAccent.GHOST,
-			});
 		}
 	}
 

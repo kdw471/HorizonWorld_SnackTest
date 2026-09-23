@@ -37,6 +37,7 @@ import {
 	isEndPointInsidePlayField,
 	isInsidePlayField,
 	isOnEndPointLane,
+	snapAxisValueToCell,
 	toFullGridIndex,
 	toPlayLocalIndex,
 } from 'RushHour_Definitions';
@@ -315,7 +316,7 @@ export class RushHourBoard {
 	 * 여기서 좌표는 좌측·상단 블록 중심의 격자 좌표(플레이 로컬, 실수)이다.
 	 */
 	public snapFromContinuous(pieceId: string, continuousRow: number, continuousCol: number): RushHourSlideResult {
-		return this.snapToCell(pieceId, Math.round(continuousRow), Math.round(continuousCol));
+		return this.snapToCell(pieceId, snapAxisValueToCell(continuousRow), snapAxisValueToCell(continuousCol));
 	}
 
 	//#endregion

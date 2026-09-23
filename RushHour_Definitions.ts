@@ -211,6 +211,27 @@ export function toPlayLocalIndex(fullIndex: number): number {
 	return fullIndex - RUSH_HOUR_PLAY_ORIGIN;
 }
 
+/**
+ * 연속 축 좌표(좌측·상단 블록의 격자 좌표)를 놓일 칸으로 확정한다 - 기획서 §7 "절반" 규칙.
+ *
+ * **판정 기준은 손가락이 아니라 눈에 보이는 블록의 겹침이다.** 끌고 있는 블록이 다음 칸을
+ * **절반 넘게** 덮고 있으면 그 칸으로 가고, 절반에 못 미치면 아직 더 많이 걸쳐 있는 앞 칸에
+ * 남는다. 블록이 통째로 같은 양만큼 움직이므로 좌측·상단 블록 하나로 판정하면 나머지 칸도
+ * 같은 결론이 된다.
+ *
+ * 딱 절반(0.5)은 "넘지 않은" 것으로 본다 - `Math.round()` 는 양수 쪽으로만 올려 보내
+ * 위/아래(좌/우) 판정이 비대칭이 된다.
+ *
+ * 드래그 중 미리보기(`RushHourCoreAPI.trackDragToLocal`)와 뗄 때의 확정
+ * (`RushHourDragController.end`)이 **같은 함수**를 쓴다 - 두 곳이 어긋나면 손을 떼는 순간
+ * 조각이 미리보기와 다른 칸으로 뛴다.
+ */
+export function snapAxisValueToCell(value: number): number {
+	const base = Math.floor(value);
+	const overlap = value - base;
+	return overlap > 0.5 ? base + 1 : base;
+}
+
 /** 플레이 공간(7x7) 안의 좌표인지 */
 export function isInsidePlayField(row: number, col: number): boolean {
 	return row >= 0 && row < RUSH_HOUR_PLAY_GRID_SIZE && col >= 0 && col < RUSH_HOUR_PLAY_GRID_SIZE;

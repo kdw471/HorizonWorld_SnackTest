@@ -793,7 +793,8 @@ function testSwitchIntegration(recorder: TestRecorder): void {
 	const presenter = new PuzzleBoardPresenter(SWITCH_LAYOUT, {
 		onCellDown: (cell) => { session.touchDown(cell); },
 		onCellMove: (cell) => { session.touchMove(cell); },
-		onCellUp: () => { session.touchUp(); },
+		// 뗀 칸을 그대로 넘긴다 - CoreAPI 의 배선과 같아야 의미가 있는 통합 테스트다
+		onCellUp: (cell) => { session.touchUp(cell); },
 	});
 
 	const applyCellVisual = (cell: number): void => {
@@ -829,15 +830,28 @@ function testSwitchIntegration(recorder: TestRecorder): void {
 		presenter.getView().grid.cells.filter((cell) => cell.isVisible).length > 0);
 	recorder.check('통합 - 레벨 로드로 입력이 켜진다', presenter.isInputEnabled);
 
-	// 밖에서 떼면 눌리지 않는다 (PUZ_08 M2) - 색이 그대로여야 한다
+	// 판을 벗어나 떼면 눌리지 않는다 (PUZ_08 M2) - 색이 그대로여야 한다.
+	// 벗어났다는 신호는 격자 밖 배경의 `pointerLeaveBoard()` 다. 칸에서 스쳐 가는
+	// `pointerExit` 만으로는 벗어난 것이 아니다 (그것은 뗄 때 늘 오는 신호다).
 	const probeCell = session.board?.getPressablePositions()[0] ?? 0;
 	const beforeState = session.board?.getCellAt(probeCell);
 	presenter.pointerDown(probeCell);
-	presenter.pointerExit(probeCell);
+	presenter.pointerLeaveBoard();
 	presenter.pointerUp();
 	session.update(PRESS_SEQUENCE_SECONDS + 0.01);
-	recorder.check('통합 - 칸 밖에서 떼면 눌리지 않는다',
+	recorder.check('통합 - 판을 벗어나 떼면 눌리지 않는다',
 		session.board?.getCellAt(probeCell) === beforeState);
+
+	// 회귀 (인월드 "터치해도 색이 안 바뀐다") - 뗄 때 exit 가 먼저 와도 탭은 확정된다.
+	// 모바일 Pressable 이 실제로 보내는 순서다: onPress -> onExit -> onRelease.
+	const tapCell = session.board?.getPressablePositions()[0] ?? 0;
+	const beforeTapState = session.board?.getCellAt(tapCell);
+	presenter.pointerDown(tapCell);
+	presenter.pointerExit(tapCell);   // 떼기 직전에 도착하는 exit
+	presenter.pointerUp();
+	session.update(PRESS_SEQUENCE_SECONDS + 0.01);
+	recorder.check('통합 - 떼기 직전 exit 가 와도 키 캡이 토글된다',
+		session.board?.getCellAt(tapCell) !== beforeTapState);
 
 	// 솔버가 시키는 대로 UI 탭만으로 끝까지 푼다
 	let guard = 0;
