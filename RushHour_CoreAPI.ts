@@ -45,7 +45,7 @@ import {
 } from 'Puzzle_HorizonBridge';
 import { EPuzzleId, getCatalogEntry } from 'PuzzleUI_Definitions';
 import { PuzzleHubRegistry, buildPuzzleLevelTable, createPuzzleHandle } from 'PuzzleUI_Registry';
-import { EBoardCellAccent, PUZZLE_BOARD_CELL_OUTSIDE, PuzzleBoardColor, PuzzleTextureKey, boardColor, textureKey } from 'PuzzleBoardUI_Definitions';
+import { EBoardCellAccent, PUZZLE_BOARD_CELL_OUTSIDE, PUZZLE_BOARD_MAX_PIECES, PuzzleBoardColor, PuzzleTextureKey, boardColor, textureKey } from 'PuzzleBoardUI_Definitions';
 import { PuzzleTextureLibrary } from 'PuzzleBoardUI_TextureLibrary';
 import { PuzzleBoardPresenter, PuzzleBoardStage } from 'PuzzleBoardUI_Presenter';
 import { RushHourLevelGenerator } from 'RushHour_LevelGenerator';
@@ -54,6 +54,7 @@ import { RushHourTables } from 'RushHour_DataTables';
 import { RushHourSession } from 'RushHour_Session';
 import { EDragAxis } from 'RushHour_DragController';
 import {
+	EEdge,
 	EMoveDirection,
 	EOrientation,
 	EPieceColor,
@@ -95,6 +96,8 @@ const COLOR_LABEL: PuzzleBoardColor = boardColor(1, 1, 1);
 
 /** 목표 오브젝트 칸의 라벨 - 방해물과 한눈에 구분된다 */
 const GOAL_LABEL = 'U';
+/** 꽂힌 USB 가 조각 계층에서 슬롯 쪽으로 들어가 보이는 깊이 (칸) - §9 의 반 칸 */
+const DOCK_VISUAL_TRAVEL = 0.5;
 
 /**
  * 이 퍼즐의 텍스처 키. 에디터 prop 과 1:1 로 대응한다.
@@ -135,6 +138,15 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		 * 놓은 자리에 스냅" 이 조작 규격이라, 이제는 끄는 쪽이 예외다.
 		 */
 		continuousDrag: { type: PropTypes.Boolean, default: true },
+		/**
+		 * 조각 계층을 쓸지 (기본 켬) - Noesis 보드 패널(`NoesisBoard_Panel`) 전용.
+		 *
+		 * 켜면 말은 칸에 칠하지 않고 프레젠터의 조각 계층(`setPiece`)으로 그린다. 패널이 포인터 좌표를
+		 * 격자 좌표로 바꿔 `onPieceGrab/Drag/Drop` 으로 넘기고, 세션의 드래그 컨트롤러가 정한 위치를
+		 * 조각 계층에 돌려준다. 끄는 동안 말이 손가락을 연속으로 따라오고, 막힘·결합 규칙은 그대로다.
+		 * Custom UI 판(`PuzzleBoardUI_Panel`)은 조각 계층을 그리지 않으므로 그 판을 쓸 때는 끈다.
+		 */
+		pieceLayer: { type: PropTypes.Boolean, default: true },
 		/** 퀘스트 중 카메라를 고정할지 (기본 끔). 보드가 Custom UI 라 입력에는 필요 없다 */
 		focusCamera: { type: PropTypes.Boolean, default: false },
 		/** `focusCamera` 가 켜졌을 때 카메라가 바라볼 대상 (보통 보드 UI gizmo) */
@@ -213,6 +225,14 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 
 	private _isInteractionActive: boolean = false;
 
+	/**
+	 * 조각 계층 (`pieceLayer`) - 조각 자리 번호 -> 말 id. 레벨을 열 때 보드의 말 순서대로 붙인다.
+	 * 컨트롤러가 준 연속 좌표(`_dragVisualRow/Col`)는 칸으로 반올림하기 전의 값이다 - 조각은 이 값으로 그린다.
+	 */
+	private _pieceSlots: string[] = [];
+	private _dragVisualRow: number = 0;
+	private _dragVisualCol: number = 0;
+
 	//#region Lifecycle
 
 	public start(): void {
@@ -268,7 +288,8 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 				onStreamEnd: (point) => this.onStreamDragEnd(point),
 				onStreamRelease: () => this.onStreamRelease(),
 			},
-			{ drivesMoves: this.props.continuousDrag });
+			// 조각 계층이 켜지면 이동·뗌 좌표는 패널에서 온다 - 스트림은 뗌 안전망으로만 남긴다
+			{ drivesMoves: this.props.continuousDrag && this.props.pieceLayer === false });
 		console.log('[RushHourCoreAPI] Drag stream created '
 			+ `(move driving ${this.props.continuousDrag ? 'on' : 'off'}). `
 			+ 'Release recovery from Focused Interaction input is always on; '
@@ -318,21 +339,161 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	}
 
 	private createPresenter(): void {
+		const isPieceLayer = this.props.pieceLayer === true;
 		this._presenter = new PuzzleBoardPresenter(
 			{
 				title: getCatalogEntry(EPuzzleId.RUSH_HOUR)?.displayName ?? '',
 				rowCount: RUSH_HOUR_FULL_GRID_SIZE,
 				colCount: RUSH_HOUR_FULL_GRID_SIZE,
 				boardTexture: TEXTURE_BOARD,
+				pieceCount: isPieceLayer ? PUZZLE_BOARD_MAX_PIECES : undefined,
 			},
-			{
-				onCellDown: (cell) => { this.onDragBegin(cell); },
-				onCellMove: (cell) => { this.onDragMove(cell); },
-				onCellUp: (cell) => { this.onDragEnd(cell); },
-				// 보조 레이아웃의 Reset 버튼 - 판만 되돌리고 남은 시간은 그대로 둔다
-				onReset: () => { this.resetLevel(); },
-			},
+			isPieceLayer
+				? {
+					// 조각 계층 - 패널이 포인터 좌표를 격자 좌표(전체 9x9, 실수)로 바꿔 준다
+					onPieceGrab: (piece, row, col) => this.onPieceGrab(piece, row, col),
+					onPieceDrag: (_piece, row, col) => { this.onPieceDrag(row, col); },
+					onPieceDrop: (_piece, row, col) => { this.onPieceDrop(row, col); },
+					onPieceCancel: () => { this.onPieceCancel(); },
+					onReset: () => { this.resetLevel(); },
+				}
+				: {
+					onCellDown: (cell) => { this.onDragBegin(cell); },
+					onCellMove: (cell) => { this.onDragMove(cell); },
+					onCellUp: (cell) => { this.onDragEnd(cell); },
+					// 보조 레이아웃의 Reset 버튼 - 판만 되돌리고 남은 시간은 그대로 둔다
+					onReset: () => { this.resetLevel(); },
+				},
 		);
+	}
+
+	//#endregion
+
+	//#region Input - piece layer (패널의 좌표 -> 세션의 드래그 컨트롤러 -> 조각 계층)
+
+	/**
+	 * 조각을 잡았다. 좌표는 전체 9x9 격자의 연속 좌표다 - 세션은 플레이 로컬 좌표를 받으므로 원점을 뺀다.
+	 * 컨트롤러가 좌표로 말을 찾는다 (선택 반경 포함). 패널이 맞힌 조각과 다를 수 있으므로 컨트롤러가 준 id 를 믿는다.
+	 */
+	private onPieceGrab(_piece: number, row: number, col: number): boolean {
+		const localRow = row - RUSH_HOUR_PLAY_ORIGIN;
+		const localCol = col - RUSH_HOUR_PLAY_ORIGIN;
+		const result = this.session.beginDrag(localRow, localCol);
+		if (result.isAccepted === false || result.pieceId === undefined) {
+			return false;
+		}
+		const piece = this.session.board?.getPiece(result.pieceId);
+		if (piece === undefined) {
+			return false;
+		}
+		// 잡은 지점을 기준점으로 - 말이 "잡은 자리 그대로" 손가락에 붙어 따라온다
+		this.session.rebaseDragOrigin(localRow, localCol);
+		this._previewPieceId = piece.id;
+		this._previewRow = piece.row;
+		this._previewCol = piece.col;
+		this._originRow = piece.row;
+		this._originCol = piece.col;
+		this._dragVisualRow = piece.row;
+		this._dragVisualCol = piece.col;
+		this._dragAxis = toDragAxis(piece.orientation);
+		this.applyDragFocusedVisuals();
+		this.applyPieceVisuals();
+		return true;
+	}
+
+	/** 끌고 있다 - 컨트롤러가 자른 연속 좌표를 조각에 바로 쓴다. 칸이 바뀌면 길·실루엣도 따라온다 */
+	private onPieceDrag(row: number, col: number): void {
+		if (this._previewPieceId === undefined) {
+			return;
+		}
+		this.trackDragToLocal(row - RUSH_HOUR_PLAY_ORIGIN, col - RUSH_HOUR_PLAY_ORIGIN);
+		this.syncDragPieceView();
+	}
+
+	/**
+	 * 놓았다 - **좌표를 다시 넣지 않고** 마지막 Move 까지 반영된 자리에 확정한다 (`onPieceCancel` 과 같은 경로).
+	 *
+	 * 모바일 실기(2026-09-23)에서 격자 안에서 손가락을 떼면 조각이 원래 자리로 돌아갔는데, 격자 밖에서 떼거나
+	 * 다른 손가락으로 화면을 건드려 뗌 안전망(`onStreamRelease` -> `onPieceCancel`)으로 닫히면 지금 자리에 놓였다.
+	 * 두 경로의 차이는 놓는 순간 좌표를 한 번 더 `trackDragToLocal` 에 넣느냐뿐이었다 - Noesis 가 뗄 때 주는
+	 * 좌표는 Move 와 기준이 달라 그 한 번이 조각을 되돌렸다. 패널이 넘기는 좌표는 마지막으로 받아들인 Move 라
+	 * 이미 반영돼 있으므로 받기만 하고 쓰지 않는다 (`NoesisBoardPanel.onPointerUp`).
+	 */
+	private onPieceDrop(_row: number, _col: number): void {
+		if (this._previewPieceId === undefined) {
+			return;
+		}
+		this.finalizeDrag();
+		this.applyPieceVisuals();
+	}
+
+	/** 좌표 없는 마감 (일시정지·패널 내려감) - 마지막 자리에 놓는다 */
+	private onPieceCancel(): void {
+		if (this._previewPieceId === undefined) {
+			return;
+		}
+		this.finalizeDrag();
+		this.applyPieceVisuals();
+	}
+
+	/** 끌고 있는 말 하나만 - 이동 이벤트마다 부르므로 나머지 말은 건드리지 않는다 */
+	private syncDragPieceView(): void {
+		const pieceId = this._previewPieceId;
+		const slot = pieceId === undefined ? -1 : this._pieceSlots.indexOf(pieceId);
+		if (slot < 0) {
+			return;
+		}
+		this._presenter.setPiece(slot, {
+			row: toFullGridIndex(this._dragVisualRow),
+			col: toFullGridIndex(this._dragVisualCol),
+		});
+	}
+
+	/**
+	 * 모든 말을 조각 계층에 쓴다 - 레벨 로드·놓기·결합 뒤.
+	 * 꽂힌 USB 는 슬롯 쪽으로 반 칸 들어가 보인다 (§9 의 "반 칸 더 밀기" 를 그대로 보여 준다).
+	 */
+	private applyPieceVisuals(): void {
+		const board = this.session.board;
+		if (this.props.pieceLayer !== true || board === undefined) {
+			return;
+		}
+		for (let slot = 0; slot < PUZZLE_BOARD_MAX_PIECES; slot++) {
+			const pieceId = this._pieceSlots[slot];
+			const piece = pieceId === undefined ? undefined : board.getPiece(pieceId);
+			if (piece === undefined) {
+				this._presenter.setPiece(slot, { isVisible: false });
+				continue;
+			}
+			const isPreview = piece.id === this._previewPieceId;
+			let row = isPreview ? this._dragVisualRow : piece.row;
+			let col = isPreview ? this._dragVisualCol : piece.col;
+			if (isPreview === false && board.isDocked(piece.id)) {
+				const endPoint = board.getEndPointForPiece(piece.id);
+				if (endPoint !== undefined) {
+					switch (endPoint.edge) {
+						case EEdge.TOP: row -= DOCK_VISUAL_TRAVEL; break;
+						case EEdge.BOTTOM: row += DOCK_VISUAL_TRAVEL; break;
+						case EEdge.LEFT: col -= DOCK_VISUAL_TRAVEL; break;
+						default: col += DOCK_VISUAL_TRAVEL; break;
+					}
+				}
+			}
+			const isVertical = piece.orientation === EOrientation.VERTICAL;
+			this._presenter.setPiece(slot, {
+				isVisible: true,
+				isInteractive: true,
+				row: toFullGridIndex(row),
+				col: toFullGridIndex(col),
+				rowSpan: isVertical ? piece.size : 1,
+				colSpan: isVertical ? 1 : piece.size,
+				fill: this.getPieceColor(piece),
+				texture: piece.isGoal ? TEXTURE_GOAL_PIECE : TEXTURE_BLOCKER_PIECE,
+				label: piece.isGoal ? GOAL_LABEL : '',
+				labelColor: COLOR_LABEL,
+				accent: isPreview ? EBoardCellAccent.GRABBED : EBoardCellAccent.NONE,
+			});
+		}
 	}
 
 	//#endregion
@@ -401,11 +562,43 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	}
 
 	/**
+	 * 손을 뗐다 - 오브젝트는 **뗀 자리에** 멈춘다.
+	 *
+	 * 뗀 칸을 마지막으로 한 번 더 반영한 뒤에 확정하는 것이 핵심이다. 예전에는 뗀 칸을
+	 * 버리고 곧바로 `endDrag()` 를 불렀는데, 그러면 마지막 `onCellMove` 가 기록한 자리로
+	 * 스냅된다. 빠르게 끌다 놓으면 손가락이 지나온 칸에 조각이 남아, 놓은 자리에 서지 않는
+	 * 것처럼 보였다.
+	 *
+	 * 리페인트는 **이 함수 마지막의 1회뿐이다** (제안 2). `endDrag()` 가 띄우는
+	 * PIECE_MOVED / USB_DOCKED / USB_UNDOCKED 구독은 코얼레싱 플래그를 보고 건너뛴다.
+	 * 그 1회도 결합/분리가 없었다면 실제로 바뀌는 칸(원래 자리·확정 자리·이동 축의 길)만
+	 * 기록한다 (제안 3).
+	 */
+	private onDragEnd(cell: number): void {
+		// 잡은 것이 없으면 마감할 것도 없다 - **먼저 도착한 릴리즈가 이긴다**.
+		//
+		// 뗌은 두 곳에서 올 수 있다 (칸 `Pressable` 의 release, 스트림의 `inputEnded`).
+		// 예전에는 스트림이 배달 중이면(`isDriving`) 이쪽을 통째로 버렸는데, 그러면 스트림의
+		// 뗌이 유실됐을 때 드래그가 영영 열린 채로 남았다. 지금은 어느 쪽이 먼저 오든 그쪽이
+		// 확정하고, 뒤늦게 온 쪽은 이 검사에 걸려 조용히 지나간다.
+		if (this._previewPieceId === undefined) {
+			return;
+		}
+		// 스트림이 배달 중이었다면 마지막 자리는 스트림이 이미 더 정확히 반영해 두었다 -
+		// 칸 중심 좌표로 덮어쓰지 않고 확정만 한다.
+		if (this._dragStream?.isDriving !== true) {
+			this.trackDragTo(cell);
+		}
+		this.finalizeDrag();
+	}
+
+	/**
 	 * 스트림이 알려 준 실제 터치 지점 - 잡기의 기준점을 칸 중심에서 여기로 옮긴다.
 	 * 이렇게 해야 조각이 "잡은 자리 그대로" 손가락에 붙어 따라온다 (`PuzzleDragStreamHandlers.onStreamStart`).
 	 */
 	private onStreamDragStart(point: PuzzleGridPoint): void {
-		if (this._previewPieceId === undefined) {
+		// 조각 계층에서는 좌표가 패널에서 온다 - 스트림 좌표를 겹쳐 넣지 않는다
+		if (this._previewPieceId === undefined || this.props.pieceLayer === true) {
 			return;
 		}
 		this.session.rebaseDragOrigin(point.row - RUSH_HOUR_PLAY_ORIGIN, point.col - RUSH_HOUR_PLAY_ORIGIN);
@@ -416,7 +609,7 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 	 * 칸 경계를 기다리는 칸 단위 경로와 달리 한 칸 안의 움직임도 그대로 반영된다.
 	 */
 	private onStreamDragMove(point: PuzzleGridPoint): void {
-		if (this._previewPieceId === undefined) {
+		if (this._previewPieceId === undefined || this.props.pieceLayer === true) {
 			return;
 		}
 		this.trackDragToLocal(point.row - RUSH_HOUR_PLAY_ORIGIN, point.col - RUSH_HOUR_PLAY_ORIGIN);
@@ -424,7 +617,7 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 
 	/** 스트림의 뗌 (제안 1) - `inputEnded` 는 유실되지 않으므로 릴리즈 유실 문제가 사라진다 */
 	private onStreamDragEnd(point: PuzzleGridPoint): void {
-		if (this._previewPieceId === undefined) {
+		if (this._previewPieceId === undefined || this.props.pieceLayer === true) {
 			return;
 		}
 		// 좌표를 만들 수 없었던 뗌(NaN)은 마지막 이동이 반영한 자리에 그대로 확정한다
@@ -469,6 +662,9 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		if (visual === undefined) {
 			return false;
 		}
+		// 조각 계층은 반올림 전의 연속 좌표로 그린다 (`syncDragPieceView`)
+		this._dragVisualRow = visual.row;
+		this._dragVisualCol = visual.col;
 		// §7 스냅과 같은 규칙으로 반올림한다. 컨트롤러가 이미 이동 가능 범위로 잘라 주므로
 		// 이 자리는 언제나 놓을 수 있는 자리다.
 		const row = Math.round(visual.row);
@@ -537,36 +733,7 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		}
 	}
 
-	/**
-	 * 손을 뗐다 - 오브젝트는 **뗀 자리에** 멈춘다.
-	 *
-	 * 뗀 칸을 마지막으로 한 번 더 반영한 뒤에 확정하는 것이 핵심이다. 예전에는 뗀 칸을
-	 * 버리고 곧바로 `endDrag()` 를 불렀는데, 그러면 마지막 `onCellMove` 가 기록한 자리로
-	 * 스냅된다. 빠르게 끌다 놓으면 손가락이 지나온 칸에 조각이 남아, 놓은 자리에 서지 않는
-	 * 것처럼 보였다.
-	 *
-	 * 리페인트는 **이 함수 마지막의 1회뿐이다** (제안 2). `endDrag()` 가 띄우는
-	 * PIECE_MOVED / USB_DOCKED / USB_UNDOCKED 구독은 코얼레싱 플래그를 보고 건너뛴다.
-	 * 그 1회도 결합/분리가 없었다면 실제로 바뀌는 칸(원래 자리·확정 자리·이동 축의 길)만
-	 * 기록한다 (제안 3).
-	 */
-	private onDragEnd(cell: number): void {
-		// 잡은 것이 없으면 마감할 것도 없다 - **먼저 도착한 릴리즈가 이긴다**.
-		//
-		// 뗌은 두 곳에서 올 수 있다 (칸 `Pressable` 의 release, 스트림의 `inputEnded`).
-		// 예전에는 스트림이 배달 중이면(`isDriving`) 이쪽을 통째로 버렸는데, 그러면 스트림의
-		// 뗌이 유실됐을 때 드래그가 영영 열린 채로 남았다. 지금은 어느 쪽이 먼저 오든 그쪽이
-		// 확정하고, 뒤늦게 온 쪽은 이 검사에 걸려 조용히 지나간다.
-		if (this._previewPieceId === undefined) {
-			return;
-		}
-		// 스트림이 배달 중이었다면 마지막 자리는 스트림이 이미 더 정확히 반영해 두었다 -
-		// 칸 중심 좌표로 덮어쓰지 않고 확정만 한다.
-		if (this._dragStream?.isDriving !== true) {
-			this.trackDragTo(cell);
-		}
-		this.finalizeDrag();
-	}
+	
 
 	/**
 	 * 릴리즈 확정의 본체 - 칸 단위 경로(`onDragEnd`)와 스트림 경로(`onStreamDragEnd`)가
@@ -776,7 +943,10 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 
 	private onLevelLoaded(level: RushHourLevel): void {
 		this._previewPieceId = undefined;
+		// 조각 자리는 보드의 말 순서대로 - 리셋도 같은 순서로 다시 열리므로 자리가 흔들리지 않는다
+		this._pieceSlots = (this.session.board?.pieces ?? []).map((piece) => piece.id);
 		this.applyGridVisuals();
+		this.applyPieceVisuals();
 
 		PuzzleBoardStage.instance.mount(this._presenter);
 		this._presenter.setInputEnabled(true);
@@ -868,6 +1038,11 @@ export class RushHourCoreAPI extends Component<typeof RushHourCoreAPI> {
 		// 집어 든 오브젝트가 원래 있던 자리 - 실루엣만 남긴다.
 		// 오브젝트보다 먼저 칠해 두어, 아직 원래 자리에 겹쳐 있는 칸은 아래에서 덮이게 한다.
 		this.applyGhostVisuals();
+
+		// 조각 계층이 켜지면 말은 칸에 칠하지 않는다 - 조각이 그 위에서 움직인다 (`applyPieceVisuals`)
+		if (this.props.pieceLayer === true) {
+			return;
+		}
 
 		for (const piece of board.pieces) {
 			const isPreview = piece.id === this._previewPieceId;

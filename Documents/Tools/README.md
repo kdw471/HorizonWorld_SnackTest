@@ -26,6 +26,15 @@ succeeded. This tool moves a file, polls `.editor` until the key shows up, and
 only then moves the next one. If a key never appears, the run stops rather than
 dumping the rest of the queue into the folder unverified.
 
+## GUI version
+
+A Windows GUI that does the same job one file at a time, with a per-file status
+list, lives in [`HzScriptMigratorGui/`](HzScriptMigratorGui/README.md). It is a
+single ~30 KB `.exe` built with the C# compiler bundled in Windows (no Python,
+no `%TEMP%` unpacking), installed at
+`C:\Users\<you>\Documents\HorizonTools\HzScriptMigratorGui.exe`. Prefer it for
+interactive migrations; the CLI below remains useful for scripting.
+
 ## Installation
 
 Either run the script directly with Python 3.9 or newer (it has no third-party

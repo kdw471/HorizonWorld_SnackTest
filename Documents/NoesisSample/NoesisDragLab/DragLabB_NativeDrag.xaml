@@ -1,0 +1,170 @@
+<!--
+  NoesisDragLab - page B: native drag + snap on drop.
+  MouseDragElementBehavior moves the piece inside Noesis (no script call per move).
+  X / Y are bound TwoWay; on release the script (NoesisDragLab_Panel.ts) reads them and snaps to a cell.
+
+  The pieces are direct children of the root Canvas, which sits at the page origin, so the
+  behavior's X / Y mean the same thing whether it measures from the root or from the parent.
+  The board's Canvas.Left / Top (20, 130) must match BOARD_B_LEFT / BOARD_B_TOP in the script.
+-->
+<Grid
+	xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:b="http://schemas.microsoft.com/xaml/behaviors"
+	Background="#E6101418">
+
+	<Grid.Resources>
+		<Style x:Key="LabButton" TargetType="Button">
+			<Setter Property="Foreground" Value="#FFF1F5F9"/>
+			<Setter Property="FontSize" Value="16"/>
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border x:Name="Bd" Background="#FF334155" CornerRadius="6" Padding="14,8">
+							<ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="IsPressed" Value="True">
+								<Setter TargetName="Bd" Property="Background" Value="#FF64748B"/>
+							</Trigger>
+						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+
+		<Style x:Key="SlotBox" TargetType="Border">
+			<Setter Property="Margin" Value="2"/>
+			<Setter Property="CornerRadius" Value="8"/>
+			<Setter Property="Background" Value="#FF26303A"/>
+			<Setter Property="BorderBrush" Value="#FF3A4856"/>
+			<Setter Property="BorderThickness" Value="3"/>
+		</Style>
+
+		<Style x:Key="PieceBox" TargetType="Border">
+			<Setter Property="Width" Value="56"/>
+			<Setter Property="Height" Value="56"/>
+			<Setter Property="CornerRadius" Value="8"/>
+			<Setter Property="BorderBrush" Value="#FFFFFFFF"/>
+			<Setter Property="BorderThickness" Value="2"/>
+		</Style>
+
+		<Style x:Key="PieceText" TargetType="TextBlock">
+			<Setter Property="Foreground" Value="#FFFFFFFF"/>
+			<Setter Property="FontSize" Value="22"/>
+			<Setter Property="FontWeight" Value="Bold"/>
+			<Setter Property="HorizontalAlignment" Value="Center"/>
+			<Setter Property="VerticalAlignment" Value="Center"/>
+			<Setter Property="IsHitTestVisible" Value="False"/>
+		</Style>
+	</Grid.Resources>
+
+	<Canvas>
+		<TextBlock Canvas.Left="20" Canvas.Top="14" Text="Noesis DragLab  B: native drag + snap"
+				   Foreground="#FFF8FAFC" FontSize="22" FontWeight="Bold"/>
+		<TextBlock Canvas.Left="20" Canvas.Top="50" Text="{Binding Status}"
+				   Foreground="#FF94A3B8" FontSize="14"/>
+		<TextBlock Canvas.Left="20" Canvas.Top="98" Text="drag a piece freely, release to snap to the nearest cell"
+				   Foreground="#FFCBD5E1" FontSize="14"/>
+
+		<!-- Board: a picture only, takes no input. -->
+		<UniformGrid Canvas.Left="20" Canvas.Top="130" Width="256" Height="256" Rows="4" Columns="4" IsHitTestVisible="False">
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+			<Border Style="{StaticResource SlotBox}"/>
+		</UniformGrid>
+
+		<StackPanel Canvas.Left="20" Canvas.Top="400" Orientation="Horizontal">
+			<Button Style="{StaticResource LabButton}" Content="reset" Command="{Binding OnReset}"/>
+			<Button Style="{StaticResource LabButton}" Margin="10,0,0,0"
+					Content="{Binding UpdateLabel}" Command="{Binding OnToggleUpdate}"/>
+		</StackPanel>
+
+		<!-- Live X / Y as Noesis sees them. If these move while dragging, the TwoWay source is being written. -->
+		<StackPanel Canvas.Left="300" Canvas.Top="130" Orientation="Horizontal">
+			<TextBlock Foreground="#FFFDA4AF" FontSize="14" Text="P1 "/>
+			<TextBlock Foreground="#FFFDA4AF" FontSize="14" Text="{Binding P1X, StringFormat={}{0:F0}}"/>
+			<TextBlock Foreground="#FFFDA4AF" FontSize="14" Text=" , "/>
+			<TextBlock Foreground="#FFFDA4AF" FontSize="14" Text="{Binding P1Y, StringFormat={}{0:F0}}"/>
+			<TextBlock Foreground="#FF93C5FD" FontSize="14" Text="    P2 "/>
+			<TextBlock Foreground="#FF93C5FD" FontSize="14" Text="{Binding P2X, StringFormat={}{0:F0}}"/>
+			<TextBlock Foreground="#FF93C5FD" FontSize="14" Text=" , "/>
+			<TextBlock Foreground="#FF93C5FD" FontSize="14" Text="{Binding P2Y, StringFormat={}{0:F0}}"/>
+			<TextBlock Foreground="#FF5EEAD4" FontSize="14" Text="    P3 "/>
+			<TextBlock Foreground="#FF5EEAD4" FontSize="14" Text="{Binding P3X, StringFormat={}{0:F0}}"/>
+			<TextBlock Foreground="#FF5EEAD4" FontSize="14" Text=" , "/>
+			<TextBlock Foreground="#FF5EEAD4" FontSize="14" Text="{Binding P3Y, StringFormat={}{0:F0}}"/>
+		</StackPanel>
+
+		<TextBlock Canvas.Left="300" Canvas.Top="160" Width="420" TextWrapping="Wrap" Text="{Binding Log}"
+				   Foreground="#FFE2E8F0" FontSize="14"/>
+
+		<!-- Pieces last, so they draw above everything else. -->
+		<Border Style="{StaticResource PieceBox}" Background="#FFE11D48">
+			<b:Interaction.Behaviors>
+				<b:MouseDragElementBehavior X="{Binding P1X, Mode=TwoWay}" Y="{Binding P1Y, Mode=TwoWay}"/>
+			</b:Interaction.Behaviors>
+			<b:Interaction.Triggers>
+				<b:EventTrigger EventName="MouseLeftButtonUp">
+					<b:InvokeCommandAction Command="{Binding OnP1MouseUp}"/>
+				</b:EventTrigger>
+				<b:EventTrigger EventName="TouchUp">
+					<b:InvokeCommandAction Command="{Binding OnP1TouchUp}"/>
+				</b:EventTrigger>
+				<b:EventTrigger EventName="LostMouseCapture">
+					<b:InvokeCommandAction Command="{Binding OnP1LostCapture}"/>
+				</b:EventTrigger>
+			</b:Interaction.Triggers>
+			<TextBlock Style="{StaticResource PieceText}" Text="1"/>
+		</Border>
+
+		<Border Style="{StaticResource PieceBox}" Background="#FF3B82F6">
+			<b:Interaction.Behaviors>
+				<b:MouseDragElementBehavior X="{Binding P2X, Mode=TwoWay}" Y="{Binding P2Y, Mode=TwoWay}"/>
+			</b:Interaction.Behaviors>
+			<b:Interaction.Triggers>
+				<b:EventTrigger EventName="MouseLeftButtonUp">
+					<b:InvokeCommandAction Command="{Binding OnP2MouseUp}"/>
+				</b:EventTrigger>
+				<b:EventTrigger EventName="TouchUp">
+					<b:InvokeCommandAction Command="{Binding OnP2TouchUp}"/>
+				</b:EventTrigger>
+				<b:EventTrigger EventName="LostMouseCapture">
+					<b:InvokeCommandAction Command="{Binding OnP2LostCapture}"/>
+				</b:EventTrigger>
+			</b:Interaction.Triggers>
+			<TextBlock Style="{StaticResource PieceText}" Text="2"/>
+		</Border>
+
+		<Border Style="{StaticResource PieceBox}" Background="#FF14B8A6">
+			<b:Interaction.Behaviors>
+				<b:MouseDragElementBehavior X="{Binding P3X, Mode=TwoWay}" Y="{Binding P3Y, Mode=TwoWay}"/>
+			</b:Interaction.Behaviors>
+			<b:Interaction.Triggers>
+				<b:EventTrigger EventName="MouseLeftButtonUp">
+					<b:InvokeCommandAction Command="{Binding OnP3MouseUp}"/>
+				</b:EventTrigger>
+				<b:EventTrigger EventName="TouchUp">
+					<b:InvokeCommandAction Command="{Binding OnP3TouchUp}"/>
+				</b:EventTrigger>
+				<b:EventTrigger EventName="LostMouseCapture">
+					<b:InvokeCommandAction Command="{Binding OnP3LostCapture}"/>
+				</b:EventTrigger>
+			</b:Interaction.Triggers>
+			<TextBlock Style="{StaticResource PieceText}" Text="3"/>
+		</Border>
+	</Canvas>
+</Grid>

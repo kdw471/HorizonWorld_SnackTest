@@ -109,3 +109,14 @@
 | [`CardMatch_LevelGenerator.md`](CardMatch_LevelGenerator.md) | `CardMatch_LevelGenerator.ts` | 3건 | 685 B |
 
 합계: 2,355건 / 356,741 B 절감 (1,448,345 B → 1,091,604 B)
+
+## 처음부터 주석 없이 작성한 스크립트
+
+| 문서 | 원본 | 내용 |
+|---|---|---|
+| [`DragLab_Panel.md`](DragLab_Panel.md) | `DragLab_Panel.ts` | Custom UI 드래그 이동 방식 비교 실험실 (테스트 전용) |
+| [`NoesisDragLab_Panel.md`](NoesisDragLab_Panel.md) | `NoesisDragLab_Panel.ts` | Noesis UI 격자 보드 드래그 앤 드롭 실험 (테스트 전용, XAML 2장) |
+| [`NoesisBoard_Panel.md`](NoesisBoard_Panel.md) | `NoesisBoard_Panel.ts` | **퍼즐 보드를 Noesis UI 로 그리는 표현 계층** - `PuzzleBoardUI_Panel` 의 후계, 같은 프레젠터 계약을 구독한다. 2단계: 조각 계층(포인터 좌표로 스크립트가 끄는 조각) |
+| [`NoesisMoveLab_Panel.md`](NoesisMoveLab_Panel.md) | `NoesisMoveLab_Panel.ts` | 포인터 좌표(`PassEventArgsToCommand`)를 받아 **스크립트가 끄는** 러시아워 - 네이티브 드래그와 비교용 (테스트 전용) |
+| [`NoesisProbe_Panel.md`](NoesisProbe_Panel.md) | `NoesisProbe_Panel.ts` | Noesis 전면 전환 0단계 확인 장 - 색·텍스처·81칸·배열 TwoWay·Viewbox·공존 (테스트 전용) |
+| [`NoesisRushHour_Panel.md`](NoesisRushHour_Panel.md) | `NoesisRushHour_Panel.ts` | Noesis UI 로 그린 퍼즐 보드판 규격 + 러시아워 한 판 (테스트 전용) |

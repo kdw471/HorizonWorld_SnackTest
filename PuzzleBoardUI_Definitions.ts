@@ -61,6 +61,12 @@ export const PUZZLE_BOARD_SIDE_MAX_CELLS = PUZZLE_BOARD_SIDE_MAX_ROWS * PUZZLE_B
  */
 export const PUZZLE_BOARD_MAX_ITEMS = 8;
 
+/**
+ * 조각 계층의 자리 상한 - 러시아워 기획 판 중 가장 많은 것이 19개(D6)라 20이면 담긴다.
+ * Noesis 패널은 자리를 첫 대입 때 전부 만들어 두므로(키가 늦게 생기면 바인딩되지 않는다) 고정 수가 필요하다.
+ */
+export const PUZZLE_BOARD_MAX_PIECES = 20;
+
 /** 보드 밖을 가리키는 셀 번호. 드래그가 판을 벗어났을 때 이 값이 온다 (PUZ_00 §8.4) */
 export const PUZZLE_BOARD_CELL_OUTSIDE = -1;
 
@@ -574,6 +580,111 @@ export function isSameItemView(left: PuzzleBoardItemView, right: PuzzleBoardItem
 
 //#endregion
 
+//#region Pieces (칸 위를 연속 좌표로 움직이는 조각 계층)
+
+/**
+ * 격자 **위**에 따로 그려지는 조각 하나 - 러시아워의 차, 레이저의 크리스탈처럼 손가락을 따라 연속으로
+ * 움직이는 것. 칸(`PuzzleBoardCellView`)이 칸 단위로만 바뀌는 것과 달리 `row`/`col` 은 **실수**다.
+ *
+ * 조각이 있는 퍼즐은 그 조각을 칸에 칠하지 않는다 - 칸은 바탕·길·도착 포인트만 그리고, 조각은 이 계층이
+ * 그 위에서 움직인다. 표현 계층(Noesis 패널)이 포인터 좌표를 격자 좌표로 바꿔 `onPieceGrab/Drag/Drop` 으로
+ * 넘기면, 각 CoreAPI 가 자기 드래그 컨트롤러로 위치를 정해 `setPiece()` 로 돌려준다. 끄는 동안 위치를
+ * 정하는 것은 언제나 퍼즐 쪽이다 - 축 고정·막힘·결합 규칙이 거기 있기 때문이다.
+ */
+export type PuzzleBoardPieceView = {
+	/** false 면 이 자리는 비어 있다 */
+	isVisible: boolean,
+	/** false 면 집을 수 없다 (고정 오브젝트) */
+	isInteractive: boolean,
+	/** 좌상단 칸의 격자 좌표 (실수). 프레젠터 격자 기준이다 - 러시아워는 9x9 전체 그리드 좌표 */
+	row: number,
+	col: number,
+	/** 차지하는 칸 수 */
+	rowSpan: number,
+	colSpan: number,
+	fill: PuzzleBoardColor,
+	texture: PuzzleTextureKey,
+	tint: PuzzleBoardColor,
+	label: string,
+	labelColor: PuzzleBoardColor,
+	/** 집은 조각(`GRABBED`) 등 - 칸과 같은 어휘 */
+	accent: EBoardCellAccent,
+}
+
+export function createPieceView(): PuzzleBoardPieceView {
+	return {
+		isVisible: false,
+		isInteractive: true,
+		row: 0,
+		col: 0,
+		rowSpan: 1,
+		colSpan: 1,
+		fill: BOARD_COLOR_EMPTY,
+		texture: NO_TEXTURE,
+		tint: BOARD_COLOR_NO_TINT,
+		label: '',
+		labelColor: BOARD_COLOR_TEXT,
+		accent: EBoardCellAccent.NONE,
+	};
+}
+
+export function createPieceViews(count: number): PuzzleBoardPieceView[] {
+	const pieces: PuzzleBoardPieceView[] = [];
+	for (let index = 0; index < count; index++) {
+		pieces.push(createPieceView());
+	}
+	return pieces;
+}
+
+export type PuzzleBoardPiecePatch = {
+	isVisible?: boolean,
+	isInteractive?: boolean,
+	row?: number,
+	col?: number,
+	rowSpan?: number,
+	colSpan?: number,
+	fill?: PuzzleBoardColor,
+	texture?: PuzzleTextureKey,
+	tint?: PuzzleBoardColor,
+	label?: string,
+	labelColor?: PuzzleBoardColor,
+	accent?: EBoardCellAccent,
+}
+
+/** 패치를 적용한 새 스냅샷. 바뀐 것이 없으면 `undefined` (칸과 같은 규칙) */
+export function applyPiecePatch(piece: PuzzleBoardPieceView, patch: PuzzleBoardPiecePatch): PuzzleBoardPieceView | undefined {
+	if ((patch.isVisible === undefined || patch.isVisible === piece.isVisible)
+		&& (patch.isInteractive === undefined || patch.isInteractive === piece.isInteractive)
+		&& (patch.row === undefined || patch.row === piece.row)
+		&& (patch.col === undefined || patch.col === piece.col)
+		&& (patch.rowSpan === undefined || patch.rowSpan === piece.rowSpan)
+		&& (patch.colSpan === undefined || patch.colSpan === piece.colSpan)
+		&& (patch.fill === undefined || isSameColor(patch.fill, piece.fill))
+		&& (patch.texture === undefined || patch.texture === piece.texture)
+		&& (patch.tint === undefined || isSameColor(patch.tint, piece.tint))
+		&& (patch.label === undefined || patch.label === piece.label)
+		&& (patch.labelColor === undefined || isSameColor(patch.labelColor, piece.labelColor))
+		&& (patch.accent === undefined || patch.accent === piece.accent)) {
+		return undefined;
+	}
+	return {
+		isVisible: patch.isVisible ?? piece.isVisible,
+		isInteractive: patch.isInteractive ?? piece.isInteractive,
+		row: patch.row ?? piece.row,
+		col: patch.col ?? piece.col,
+		rowSpan: patch.rowSpan ?? piece.rowSpan,
+		colSpan: patch.colSpan ?? piece.colSpan,
+		fill: patch.fill ?? piece.fill,
+		texture: patch.texture ?? piece.texture,
+		tint: patch.tint ?? piece.tint,
+		label: patch.label ?? piece.label,
+		labelColor: patch.labelColor ?? piece.labelColor,
+		accent: patch.accent ?? piece.accent,
+	};
+}
+
+//#endregion
+
 //#region Intro (레벨 시작 배너)
 
 /**
@@ -615,6 +726,8 @@ export type PuzzleBoardView = {
 	side: PuzzleBoardSideView | undefined,
 	/** 보조 레이아웃의 오브젝트 트레이. 쓰지 않는 퍼즐은 빈 배열 */
 	items: PuzzleBoardItemView[],
+	/** 격자 위를 연속으로 움직이는 조각 (`PuzzleBoardLayoutSpec.pieceCount`). 쓰지 않는 퍼즐은 빈 배열 */
+	pieces: PuzzleBoardPieceView[],
 	/** 격자 뒤에 까는 판 그림. `NO_TEXTURE` 면 깔지 않는다 */
 	boardTexture: PuzzleTextureKey,
 	/** 집은 조각을 손가락 위로 띄울지 (`PuzzleBoardLayoutSpec.liftGrabbedPiece`) */
@@ -640,6 +753,11 @@ export type PuzzleBoardLayoutSpec = {
 	itemCount?: number,
 	/** 트레이 위에 표시할 짧은 이름 (예: "Crystals") */
 	itemLabel?: string,
+	/**
+	 * 격자 위를 연속으로 움직이는 조각 자리 수 (`PuzzleBoardPieceView`). 생략하면 조각 계층을 쓰지 않는다.
+	 * 드래그 퍼즐이 켠다 - 켜면 칸은 바탕만 그리고 조각은 이 계층이 그린다.
+	 */
+	pieceCount?: number,
 	/**
 	 * 격자 뒤에 까는 판 그림의 키. 칸 사이 간격으로 비쳐 보이므로 나무판·회로기판처럼
 	 * 판 전체의 재질을 표현할 때 쓴다. 생략하면 깔지 않는다.
@@ -701,6 +819,7 @@ export function createBoardView(spec: PuzzleBoardLayoutSpec): PuzzleBoardView {
 				cells: createGridView(side.rowCount, side.colCount).cells,
 			},
 		items: createItemViews(Math.max(0, spec.itemCount ?? 0)),
+		pieces: createPieceViews(Math.max(0, spec.pieceCount ?? 0)),
 		boardTexture: spec.boardTexture ?? NO_TEXTURE,
 		liftGrabbedPiece: spec.liftGrabbedPiece === true,
 		grabLiftCellRatio: resolveGrabLiftRatio(spec.grabLiftCellRatio),
@@ -754,6 +873,10 @@ export function validateBoardLayout(spec: PuzzleBoardLayoutSpec): string[] {
 	const itemCount = spec.itemCount;
 	if (itemCount !== undefined && (itemCount < 0 || itemCount > PUZZLE_BOARD_MAX_ITEMS)) {
 		violations.push(`itemCount ${itemCount} is out of range (0..${PUZZLE_BOARD_MAX_ITEMS}).`);
+	}
+	const pieceCount = spec.pieceCount;
+	if (pieceCount !== undefined && (pieceCount < 0 || pieceCount > PUZZLE_BOARD_MAX_PIECES)) {
+		violations.push(`pieceCount ${pieceCount} is out of range (0..${PUZZLE_BOARD_MAX_PIECES}).`);
 	}
 	return violations;
 }

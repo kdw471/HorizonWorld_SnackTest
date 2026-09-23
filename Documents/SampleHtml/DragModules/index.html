@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>드래그 & 드롭 모듈 테스트</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      touch-action: none; /* 모바일 스크롤 방지 */
+    }
+    body {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background-color: #1a1a1a;
+      color: #fff;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+
+    /* 탭 헤더 영역 */
+    .tab-header {
+      display: flex;
+      background-color: #2a2a2a;
+      border-bottom: 2px solid #333;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 14px 8px;
+      background: none;
+      border: none;
+      color: #888;
+      font-size: 0.9rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    .tab-btn.active {
+      color: #00e676;
+      background-color: #1a1a1a;
+      border-bottom: 3px solid #00e676;
+    }
+
+    /* 컨텐츠 뷰포트 */
+    .tab-content {
+      flex: 1;
+      position: relative;
+      display: none;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    .tab-content.active {
+      display: block;
+    }
+
+    /* 드래그 가능한 오브젝트 기본 스타일 */
+    .draggable-obj {
+      position: absolute;
+      width: 60px;
+      height: 60px;
+      background: linear-gradient(135deg, #ff4b4b, #cc0000);
+      border: 2px solid #ff8888;
+      border-radius: 8px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-weight: bold;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+      cursor: grab;
+      user-select: none;
+      z-index: 10;
+    }
+    .draggable-obj:active {
+      cursor: grabbing;
+      opacity: 0.9;
+      transform: scale(1.05);
+    }
+
+    /* Tab 2: 격자 판 */
+    #grid-board {
+      position: absolute;
+      top: 50px;
+      left: 20px;
+      display: grid;
+      grid-template-columns: repeat(5, 60px);
+      grid-template-rows: repeat(5, 60px);
+      gap: 4px;
+      background-color: #333;
+      padding: 4px;
+      border-radius: 8px;
+    }
+    .grid-cell {
+      background-color: #444;
+      border-radius: 4px;
+    }
+
+    /* Tab 3: 드롭 존 */
+    .drop-zone {
+      position: absolute;
+      border: 2px dashed #00e676;
+      background-color: rgba(0, 230, 118, 0.1);
+      border-radius: 12px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      color: #00e676;
+      font-weight: bold;
+      font-size: 0.85rem;
+    }
+
+    /* 안내 메시지 패널 */
+    .info-panel {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: rgba(0,0,0,0.8);
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      border: 1px solid #444;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <!-- 탭 메뉴 -->
+  <div class="tab-header">
+    <button class="tab-btn active" onclick="switchTab(0)">1. 자유 드래그</button>
+    <button class="tab-btn" onclick="switchTab(1)">2. 격자 스냅</button>
+    <button class="tab-btn" onclick="switchTab(2)">3. 존 드롭</button>
+  </div>
+
+  <!-- TAB 1: 자유 드래그 -->
+  <div class="tab-content active" id="tab1">
+    <div class="draggable-obj" id="free-obj">FREE</div>
+    <div class="info-panel" id="info1">오브젝트를 자유롭게 드래그해 보세요.</div>
+  </div>
+
+  <!-- TAB 2: 격자 스냅 -->
+  <div class="tab-content" id="tab2">
+    <div id="grid-board"></div>
+    <div class="draggable-obj" id="grid-obj">GRID</div>
+    <div class="info-panel" id="info2">드래그 후 놓으면 가까운 격자로 스냅됩니다.</div>
+  </div>
+
+  <!-- TAB 3: 존 드롭 -->
+  <div class="tab-content" id="tab3">
+    <div class="drop-zone" id="zone-a" style="left: 30px; top: 60px; width: 120px; height: 120px;">ZONE A</div>
+    <div class="drop-zone" id="zone-b" style="right: 30px; top: 60px; width: 120px; height: 120px;">ZONE B</div>
+    <div class="draggable-obj" id="zone-obj" style="left: 150px; top: 300px;">DROP</div>
+    <div class="info-panel" id="info3">Zone 영역 바깥에 놓으면 원래 위치로 복귀합니다.</div>
+  </div>
+
+  <script src="./dist/game.js"></script>
+  <script>
+    function switchTab(index) {
+      const btns = document.querySelectorAll('.tab-btn');
+      const contents = document.querySelectorAll('.tab-content');
+      btns.forEach((btn, i) => btn.classList.toggle('active', i === index));
+      contents.forEach((content, i) => content.classList.toggle('active', i === index));
+    }
+  </script>
+</body>
+</html>

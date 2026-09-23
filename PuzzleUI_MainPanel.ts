@@ -49,9 +49,10 @@
  *   3. 같은 클라이언트에서 도는 각 퍼즐의 `*_CoreAPI` 가 `PuzzleHubRegistry` 에 핸들을
  *      등록하면 그 퍼즐이 자동으로 "준비 중" 에서 풀린다. CoreAPI 의 `autoStart` 는
  *      **기본값이 꺼짐**이라, 게임은 언제나 이 메뉴에서 시작한다.
- *   4. 진행도를 영구 저장하려면 에디터에서 변수 그룹을 하나 만든다
- *      (`PuzzleUI_PersistentProgress.ts` 머리말 참조). 안 만들어도 게임은 돌고,
- *      그 경우 진행도는 세션 동안만 유지된다.
+ *   4. 진행도를 영구 저장하려면 변수 그룹 하나와 **`Puzzle_ProgressServer` 가 붙은
+ *      Default(서버) 엔티티 하나**가 필요하다 (`PuzzleUI_PersistentProgress.ts` 머리말 참조).
+ *      Local 스크립트는 영구 변수 API 를 부를 수 없어 그 서버 스크립트에 중계한다.
+ *      안 만들어도 게임은 돌고, 그 경우 진행도는 세션 동안만 유지된다.
  *
  * 모바일 지침 (PUZ_00 §8)
  *   - 버튼은 화면 폭의 40% 이상, 세로 8% 이상으로 잡아 엄지로 누르기 넉넉하게 한다
@@ -62,10 +63,10 @@
  * ## 재입장
  *
  * 이 패널이 만들어질 때 `bootToMainMenu()` 가 돌아 **언제나 메인 메뉴에서 시작한다.**
- * 진행도는 영구 변수에서 다시 읽으므로 그대로 남는다.
+ * 진행도는 서버 스크립트에 다시 물어보므로 그대로 남는다 (응답이 늦게 오면 그때 메뉴만 다시 그린다).
  */
 
-import { AudioGizmo, Color, PropTypes } from 'horizon/core';
+import { AudioGizmo, Color, Player, PropTypes } from 'horizon/core';
 import { Binding, Pressable, Text, UIComponent, UINode, View } from 'horizon/ui';
 import { SubscriptionBag } from 'Utility_Events';
 import { PuzzleHubModel } from 'PuzzleUI_Model';
@@ -90,11 +91,11 @@ import {
 	resolveCanvas,
 	toUIDeviceClass,
 } from 'PuzzleUI_Layout';
-import { MemoryProgressStorage, PuzzleProgressTracker } from 'PuzzleUI_Progress';
+import { MemoryProgressStorage, PuzzleProgressTracker, parseProgressSnapshot } from 'PuzzleUI_Progress';
 import {
 	DEFAULT_PROGRESS_VARIABLE_KEY,
-	HorizonProgressStorage,
-	canUsePersistentStorage,
+	PuzzleProgressNetworkEvents,
+	RelayProgressStorage,
 } from 'PuzzleUI_PersistentProgress';
 import {
 	EPuzzleHubScreen,
@@ -153,6 +154,22 @@ const PAUSE_BUTTON_LABEL = 'Pause';
 
 const TOAST_SECONDS = 2;
 
+/**
+ * 진행도 응답을 이만큼 기다렸는데도 오지 않으면 서버 스크립트가 없는 것으로 보고 경고한다.
+ * 게임을 막지 않으므로 넉넉하게 잡는다 - 월드 로드 직후에는 서버도 바쁘다.
+ */
+const PROGRESS_REPLY_TIMEOUT_MS = 5000;
+
+/**
+ * 응답이 없으면 REQUEST 를 이만큼까지 다시 보낸다.
+ *
+ * 소유권이 넘어오는 도중에 발행된 이벤트는 **지연 발행분까지 전부 유실된다**
+ * (`설계/Horizon_실행모드_제약과_규칙.md` §2.2). 첫 REQUEST 는 정확히 그 시점
+ * (`initializeUI()`)에 나가므로, 한 번 안 왔다고 서버가 없다고 단정하면 진행도가 있는데도
+ * 빈 메뉴로 남는다. 필요한 값은 다시 읽어 온다는 규칙을 그대로 따른다.
+ */
+const PROGRESS_REQUEST_MAX_ATTEMPTS = 3;
+
 //#endregion
 
 type CatalogSlot = {
@@ -167,8 +184,12 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 		/**
 		 * 진행도를 담을 플레이어 영구 변수 키 (`그룹이름:변수이름`).
 		 *
-		 * 에디터에 그 변수 그룹이 없으면 자동으로 메모리 저장으로 떨어진다 - 게임은 그대로 돌고
-		 * 진행도가 세션 동안만 유지될 뿐이다. 어느 쪽으로 붙었는지는 시작 시 콘솔에 찍힌다.
+		 * **`Puzzle_ProgressServer` 의 같은 prop 과 값이 같아야 한다.** 실제 읽기·쓰기는
+		 * 그 서버 스크립트가 하고 이 패널은 이벤트로 부탁만 한다 - Local 스크립트는
+		 * 영구 변수 API 를 부를 수 없기 때문이다.
+		 *
+		 * 서버 스크립트가 없거나 변수 그룹이 없으면 자동으로 메모리 저장으로 남는다 - 게임은
+		 * 그대로 돌고 진행도가 세션 동안만 유지될 뿐이다. 어느 쪽인지는 콘솔에 찍힌다.
 		 * 비워 두면 영구 저장을 아예 시도하지 않는다.
 		 */
 		progressVariableKey: { type: PropTypes.String, default: DEFAULT_PROGRESS_VARIABLE_KEY },
@@ -236,6 +257,18 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 	 * 때 정리하지 않으면 버려진 모델을 가리키는 구독이 겹쳐 쌓이므로 `dispose()` 에서 끊는다.
 	 */
 	private readonly _stageSubscriptions: SubscriptionBag = new SubscriptionBag();
+
+	/**
+	 * 진행도 서버 스크립트와 주고받는 네트워크 이벤트 구독.
+	 *
+	 * 스테이지 구독과 같은 이유로 `dispose()` 에서 끊는다 - 재입장하면 이 패널이 다시
+	 * 만들어지고, 끊지 않으면 죽은 패널의 콜백이 남는다.
+	 */
+	private readonly _networkSubscriptions: SubscriptionBag = new SubscriptionBag();
+	/** 서버 응답을 기다리다 포기할 타이머. 응답이 오면 지운다 */
+	private _progressWaitTimeoutId: number | undefined = undefined;
+	/** 지금까지 보낸 REQUEST 수. `PROGRESS_REQUEST_MAX_ATTEMPTS` 에 닿으면 포기하고 경고한다 */
+	private _progressRequestAttempts: number = 0;
 
 	/** 이 플레이어의 기기 규격. `initializeUI()` 에서 한 번 정하고 바뀌지 않는다 */
 	private _profile: PuzzleUILayoutProfile = getLayoutProfile(EUIDeviceClass.DESKTOP);
@@ -446,27 +479,104 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 
 	public dispose(): void {
 		this.stopCountdownBlink();
+		this.clearProgressWaitTimeout();
+		this.clearToastTimeout();
+		this._networkSubscriptions.disconnect();
 		this._stageSubscriptions.disconnect();
 		this._model?.dispose();
 		this._model = undefined;
 	}
 
 	/**
-	 * 영구 저장을 쓸 수 있으면 쓰고, 아니면 메모리로 떨어진다.
-	 * 어느 쪽으로 붙었는지 로그로 남긴다 - "Continue 가 왜 초기화되죠" 를 콘솔만 보고 답하기 위해서다.
+	 * 진행도 저장소를 만든다. **영구 변수는 여기서 직접 건드리지 않는다.**
+	 *
+	 * Local 스크립트는 Persistent Variables API 를 부를 수 없다 (공식 제약,
+	 * `설계/Horizon_실행모드_제약과_규칙.md` §4). 예전에는 여기서 직접 불렀고, 그래서
+	 * **월드를 나가면 진행도가 사라졌다.** 지금은 Default 로 도는 `Puzzle_ProgressServer`
+	 * 에 이벤트로 부탁한다.
+	 *
+	 * 읽기가 비동기라 **트래커는 빈 진행도로 시작한다.** 응답은 `onProgressLoaded()` 가
+	 * 받아 `hydrate()` 로 합치고 그때 메뉴를 다시 그린다.
 	 */
 	private createProgressTracker(): PuzzleProgressTracker {
 		const key = this.props.progressVariableKey ?? '';
-		const player = this.entity.owner.get();
-
-		if (canUsePersistentStorage(this.world, player, key)) {
-			console.log(`[PuzzleHub] Progress is stored in the persistent variable "${key}".`);
-			return new PuzzleProgressTracker(new HorizonProgressStorage(this.world, player, key));
+		if (key === '') {
+			console.log('[PuzzleHub] progressVariableKey is empty; progress is kept in memory only.');
+			return new PuzzleProgressTracker(new MemoryProgressStorage());
 		}
 
-		console.log('[PuzzleHub] Progress is kept in memory only; it resets when the player leaves. '
-			+ 'Create the persistent variable group to keep it (see PuzzleUI_PersistentProgress.ts).');
-		return new PuzzleProgressTracker(new MemoryProgressStorage());
+		const player = this.entity.owner.get();
+		const tracker = new PuzzleProgressTracker(new RelayProgressStorage((raw) => {
+			this.sendNetworkBroadcastEvent(PuzzleProgressNetworkEvents.SAVE, { player: player, raw: raw });
+		}));
+
+		// 응답은 이 플레이어에게만 온다. 다른 클라이언트의 진행도를 받지 않는다.
+		this._networkSubscriptions.add(this.connectNetworkEvent(
+			player,
+			PuzzleProgressNetworkEvents.LOADED,
+			(payload) => this.onProgressLoaded(payload.raw),
+		));
+		this._progressRequestAttempts = 0;
+		this.sendProgressRequest(player, key);
+
+		return tracker;
+	}
+
+	/** 서버에 진행도를 묻고 응답 타이머를 건다. 타이머가 먼저 울리면 한도까지 다시 보낸다 */
+	private sendProgressRequest(player: Player, key: string): void {
+		this._progressRequestAttempts++;
+		this.sendNetworkBroadcastEvent(PuzzleProgressNetworkEvents.REQUEST, { player: player });
+		this.startProgressWaitTimeout(player, key);
+	}
+
+	/**
+	 * 응답이 오면 뒤늦게 합친다. 값이 실제로 바뀐 경우에만 다시 그린다 -
+	 * 처음 플레이하는 사람은 빈 응답을 받고, 그때는 그릴 것이 없다.
+	 */
+	private onProgressLoaded(raw: string): void {
+		this.clearProgressWaitTimeout();
+
+		const tracker = this._model?.progress;
+		if (tracker === undefined) {
+			return;
+		}
+		if (!tracker.hydrate(parseProgressSnapshot(raw))) {
+			return;
+		}
+
+		this.applyCatalog();
+		this.applyDetail();
+	}
+
+	/**
+	 * 응답이 오지 않으면 먼저 **다시 묻는다** - 소유권 전환 중에 나간 첫 요청은 유실될 수 있다
+	 * (`PROGRESS_REQUEST_MAX_ATTEMPTS` 주석). 한도까지 물어도 없으면 서버 스크립트가 월드에
+	 * 없는 것으로 보고 콘솔에 남긴다. 조용히 두면 "Continue 가 왜 초기화되죠" 로만 드러난다.
+	 *
+	 * 게임은 그대로 돈다 - 이미 빈 진행도로 시작했고, 저장은 아무도 받지 않을 뿐이다.
+	 */
+	private startProgressWaitTimeout(player: Player, key: string): void {
+		this.clearProgressWaitTimeout();
+		this._progressWaitTimeoutId = this.async.setTimeout(() => {
+			this._progressWaitTimeoutId = undefined;
+			if (this._progressRequestAttempts < PROGRESS_REQUEST_MAX_ATTEMPTS) {
+				console.log('[PuzzleHub] No reply from Puzzle_ProgressServer yet. '
+					+ `Sending the request again (${this._progressRequestAttempts + 1}/${PROGRESS_REQUEST_MAX_ATTEMPTS}).`);
+				this.sendProgressRequest(player, key);
+				return;
+			}
+			console.warn(`[PuzzleHub] No reply from Puzzle_ProgressServer for "${key}" `
+				+ `after ${this._progressRequestAttempts} requests. `
+				+ 'Progress is kept in memory only and resets when the player leaves. '
+				+ 'Add an entity with Puzzle_ProgressServer in Default (server) execution mode.');
+		}, PROGRESS_REPLY_TIMEOUT_MS);
+	}
+
+	private clearProgressWaitTimeout(): void {
+		if (this._progressWaitTimeoutId !== undefined) {
+			this.async.clearTimeout(this._progressWaitTimeoutId);
+			this._progressWaitTimeoutId = undefined;
+		}
 	}
 
 	//#endregion
@@ -651,13 +761,18 @@ export class PuzzleUIMainPanel extends UIComponent<typeof PuzzleUIMainPanel> {
 	private showToast(message: string): void {
 		this._toastText.set(message);
 		this._toastVisible.set(true);
-		if (this._toastTimeoutId !== undefined) {
-			this.async.clearTimeout(this._toastTimeoutId);
-		}
+		this.clearToastTimeout();
 		this._toastTimeoutId = this.async.setTimeout(() => {
 			this._toastVisible.set(false);
 			this._toastTimeoutId = undefined;
 		}, TOAST_SECONDS * 1000);
+	}
+
+	private clearToastTimeout(): void {
+		if (this._toastTimeoutId !== undefined) {
+			this.async.clearTimeout(this._toastTimeoutId);
+			this._toastTimeoutId = undefined;
+		}
 	}
 
 	//#endregion

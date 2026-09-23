@@ -70,6 +70,7 @@ import {
 	toUIDeviceClass,
 } from 'PuzzleUI_Layout';
 import {
+	IPuzzleProgressStorage,
 	MemoryProgressStorage,
 	PuzzleProgressTracker,
 	parseProgressSnapshot,
@@ -207,6 +208,7 @@ export function runPuzzleUITests(): PuzzleUITestReport {
 	testProbeDifficulties(recorder);
 	testLevelTable(recorder);
 	testProgressTracker(recorder);
+	testProgressHydration(recorder);
 	testHandleFactory(recorder);
 	testRegistry(recorder);
 	testModelSelectionFlow(recorder);
@@ -340,6 +342,66 @@ function testProgressTracker(recorder: TestRecorder): void {
 		&& Object.keys(parseProgressSnapshot('')).length === 0);
 	recorder.check('진행도 - 0 이하나 숫자가 아닌 값은 버린다',
 		Object.keys(parseProgressSnapshot('{"A":0,"B":-2,"C":"x","D":3}')).join(',') === 'D');
+}
+
+/**
+ * 서버 중계 저장소의 지연 로드 검증.
+ *
+ * 로컬 스크립트는 영구 변수 API 를 부를 수 없어 서버에 물어보고, 응답이 생성자보다 늦게
+ * 온다 (`설계/Horizon_실행모드_제약과_규칙.md` §4.1). 그 사이에 깬 판이 응답에 덮이면
+ * 안 되므로 `hydrate()` 는 퍼즐마다 큰 쪽을 남긴다.
+ */
+function testProgressHydration(recorder: TestRecorder): void {
+	// 중계 저장소를 흉내 낸다 - 읽기는 언제나 비어 있고, 쓰기는 기록만 해 둔다
+	const writes: string[] = [];
+	const relay: IPuzzleProgressStorage = {
+		load: () => ({}),
+		save: (snapshot) => { writes.push(stringifyProgressSnapshot(snapshot)); },
+	};
+
+	const tracker = new PuzzleProgressTracker(relay);
+	recorder.check('지연 로드 - 응답 전에는 빈 진행도',
+		tracker.getClearedLevel(EPuzzleId.SWITCH) === 0 && writes.length === 0);
+
+	recorder.check('지연 로드 - 응답이 오면 합쳐지고 다시 그린다',
+		tracker.hydrate({ SWITCH: 3, LASER: 1 }) === true
+		&& tracker.getClearedLevel(EPuzzleId.SWITCH) === 3
+		&& tracker.getContinueLevel(EPuzzleId.SWITCH, 10) === 4);
+	recorder.check('지연 로드 - 서버가 준 값을 되돌려 쓰지 않는다', writes.length === 0);
+
+	recorder.check('지연 로드 - 같은 값이 다시 와도 다시 그리지 않는다',
+		tracker.hydrate({ SWITCH: 3, LASER: 1 }) === false);
+
+	recorder.check('지연 로드 - 뒤처진 응답은 진행도를 되돌리지 않는다',
+		tracker.hydrate({ SWITCH: 1 }) === false
+		&& tracker.getClearedLevel(EPuzzleId.SWITCH) === 3
+		&& tracker.getClearedLevel(EPuzzleId.LASER) === 1);
+	recorder.check('지연 로드 - 로컬이 앞서면 저장소에 되돌려 쓴다', writes.length === 1
+		&& parseProgressSnapshot(writes[0])['SWITCH'] === 3);
+
+	// 응답을 기다리는 사이에 한 판을 깬 경우
+	const racing = new PuzzleProgressTracker(relay);
+	writes.length = 0;
+	racing.recordCleared(EPuzzleId.SWITCH, 2);
+	recorder.check('지연 로드 - 기다리는 사이의 클리어는 즉시 저장된다', writes.length === 1);
+	recorder.check('지연 로드 - 응답보다 앞선 기록이 살아남는다',
+		racing.hydrate({ SWITCH: 1, LASER: 5 }) === true
+		&& racing.getClearedLevel(EPuzzleId.SWITCH) === 2
+		&& racing.getClearedLevel(EPuzzleId.LASER) === 5);
+	recorder.check('지연 로드 - 그 경우 병합 결과를 다시 써 준다', writes.length === 2
+		&& parseProgressSnapshot(writes[1])['SWITCH'] === 2
+		&& parseProgressSnapshot(writes[1])['LASER'] === 5);
+
+	// 서버 스크립트가 없거나 처음 플레이하는 사람 - 빈 응답
+	const empty = new PuzzleProgressTracker(relay);
+	writes.length = 0;
+	recorder.check('지연 로드 - 빈 응답은 아무것도 바꾸지 않는다',
+		empty.hydrate({}) === false && writes.length === 0);
+
+	// 서버는 문자열을 보내므로 파싱을 거쳐 들어온다
+	const parsed = new PuzzleProgressTracker(relay);
+	recorder.check('지연 로드 - 깨진 응답 문자열은 빈 진행도로 취급',
+		parsed.hydrate(parseProgressSnapshot('{oops')) === false);
 }
 
 function testHandleFactory(recorder: TestRecorder): void {

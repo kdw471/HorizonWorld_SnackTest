@@ -55,9 +55,12 @@ import {
 	PuzzleBoardItemPatch,
 	PuzzleBoardItemView,
 	PuzzleBoardLayoutSpec,
+	PuzzleBoardPiecePatch,
+	PuzzleBoardPieceView,
 	PuzzleBoardView,
 	applyCellPatch,
 	applyItemPatch,
+	applyPiecePatch,
 	createBoardView,
 	isSameCellView,
 	isSameItemView,
@@ -76,6 +79,12 @@ export type PuzzleBoardCellChange = {
 export type PuzzleBoardItemChange = {
 	index: number,
 	item: PuzzleBoardItemView,
+}
+
+/** 조각 하나가 바뀌었다 (위치·모양). 드래그 중에는 이동 이벤트마다 온다 */
+export type PuzzleBoardPieceChange = {
+	index: number,
+	piece: PuzzleBoardPieceView,
 }
 
 /**
@@ -98,7 +107,8 @@ export type PuzzleBoardPressHighlight = {
 /** 지금 누름이 어디서 시작했는지 */
 export type PuzzleBoardPressOrigin =
 	| { kind: 'cell', index: number }
-	| { kind: 'item', index: number };
+	| { kind: 'item', index: number }
+	| { kind: 'piece', index: number };
 
 /**
  * CoreAPI 가 받는 입력 콜백.
@@ -130,6 +140,18 @@ export type PuzzleBoardInputHandlers = {
 	 * STOP 처럼 타이밍이 곧 게임인 입력이 여기로 온다.
 	 */
 	onAction?: () => void,
+	/**
+	 * 조각 계층 (`PuzzleBoardLayoutSpec.pieceCount`) - 좌표는 **프레젠터 격자의 연속 좌표**(실수, 칸 단위)다.
+	 *
+	 * 표현 계층이 포인터 좌표를 격자 좌표로 바꿔 넘긴다. 잡기·이동·놓기 모두 세션(드래그 컨트롤러)이
+	 * 위치를 정하고 `setPiece()` 로 돌려준다 - 축 고정·막힘·결합 규칙이 거기 있기 때문이다.
+	 * `onPieceGrab` 이 false 를 돌려주면 잡히지 않은 것이다 (세션이 거절했다).
+	 */
+	onPieceGrab?: (piece: number, row: number, col: number) => boolean,
+	onPieceDrag?: (piece: number, row: number, col: number) => void,
+	onPieceDrop?: (piece: number, row: number, col: number) => void,
+	/** 좌표 없이 마감해야 할 때 (일시정지, 패널 내려감). 없으면 지금 자리에 놓은 것으로 `onPieceDrop` 을 부른다 */
+	onPieceCancel?: (piece: number) => void,
 }
 
 //#endregion
@@ -145,6 +167,8 @@ export class PuzzleBoardPresenter {
 	public readonly SIDE_CELL_CHANGED = new EventPublisher<PuzzleBoardCellChange>();
 	/** 트레이 슬롯 하나가 바뀌었다 */
 	public readonly ITEM_CHANGED = new EventPublisher<PuzzleBoardItemChange>();
+	/** 조각 하나가 바뀌었다 - 배치에 묶이지 않고 곧바로 나간다 (드래그 이동이 지연되면 안 된다) */
+	public readonly PIECE_CHANGED = new EventPublisher<PuzzleBoardPieceChange>();
 	/** 시작 배너가 떴다/사라졌다. 떠 있는 동안 패널은 보조 레이아웃을 그리지 않는다 */
 	public readonly INTRO_CHANGED = new EventPublisher<PuzzleBoardIntroView>();
 	/** 짚고 있는 자리가 바뀌었다 - 패널이 누름 표시를 옮긴다 */
@@ -236,6 +260,10 @@ export class PuzzleBoardPresenter {
 
 	public getItem(index: number): PuzzleBoardItemView | undefined {
 		return this._view.items[index];
+	}
+
+	public getPiece(index: number): PuzzleBoardPieceView | undefined {
+		return this._view.pieces[index];
 	}
 
 	public get isInputEnabled(): boolean {
@@ -387,6 +415,27 @@ export class PuzzleBoardPresenter {
 	public setAllItems(patch: PuzzleBoardItemPatch): void {
 		for (let index = 0; index < this._view.items.length; index++) {
 			this.setItem(index, patch);
+		}
+	}
+
+	/** 조각 하나를 갱신한다. 배치 중이어도 곧바로 알린다 - 끄는 동안의 위치는 미룰 수 없다 */
+	public setPiece(index: number, patch: PuzzleBoardPiecePatch): boolean {
+		const current = this._view.pieces[index];
+		if (current === undefined) {
+			return false;
+		}
+		const next = applyPiecePatch(current, patch);
+		if (next === undefined) {
+			return false;
+		}
+		this._view.pieces[index] = next;
+		this.PIECE_CHANGED.publish({ index: index, piece: next });
+		return true;
+	}
+
+	public setAllPieces(patch: PuzzleBoardPiecePatch): void {
+		for (let index = 0; index < this._view.pieces.length; index++) {
+			this.setPiece(index, patch);
 		}
 	}
 
@@ -613,6 +662,67 @@ export class PuzzleBoardPresenter {
 	}
 
 	/**
+	 * 조각을 잡았다 - 표현 계층이 포인터 좌표로 조각을 맞혀 부른다 (연속 격자 좌표).
+	 *
+	 * 열려 있던 누름은 뗌이 유실된 것으로 보고 먼저 마감한다 (`pointerDown` 과 같은 회복 규칙).
+	 * 세션이 거절하면(`onPieceGrab` 이 false) 누름을 열지 않는다.
+	 */
+	public pieceGrab(piece: number, row: number, col: number): boolean {
+		if (this.canAcceptInput() === false || this._handlers.onPieceGrab === undefined) {
+			return false;
+		}
+		if (this._press !== undefined) {
+			this.warnOnLostRelease('piece');
+			this.pointerUp();
+		}
+		const view = this._view.pieces[piece];
+		if (view === undefined || view.isVisible === false || view.isInteractive === false) {
+			return false;
+		}
+		if (this._handlers.onPieceGrab(piece, row, col) === false) {
+			return false;
+		}
+		this._press = { kind: 'piece', index: piece };
+		this._hoverCell = PUZZLE_BOARD_CELL_OUTSIDE;
+		this._lastInsideCell = PUZZLE_BOARD_CELL_OUTSIDE;
+		return true;
+	}
+
+	/** 잡은 조각을 끌고 있다 - 이동 이벤트마다 온다. 잡은 것이 없으면 무시한다 */
+	public pieceDrag(row: number, col: number): void {
+		const press = this._press;
+		if (press === undefined || press.kind !== 'piece' || this._handlers.onPieceDrag === undefined) {
+			return;
+		}
+		this._handlers.onPieceDrag(press.index, row, col);
+	}
+
+	/** 잡은 조각을 놓았다 - 세션이 스냅한 자리를 `setPiece()` 로 돌려준다 */
+	public pieceDrop(row: number, col: number): void {
+		const press = this._press;
+		if (press === undefined || press.kind !== 'piece') {
+			return;
+		}
+		this._press = undefined;
+		if (this._handlers.onPieceDrop !== undefined) {
+			this._handlers.onPieceDrop(press.index, row, col);
+		}
+	}
+
+	/** 좌표 없이 조각 누름을 닫는다 - 지금 보이는 자리에 놓은 것으로 마감한다 */
+	private finishPiecePress(piece: number): void {
+		this._press = undefined;
+		if (this._handlers.onPieceCancel !== undefined) {
+			this._handlers.onPieceCancel(piece);
+			return;
+		}
+		const view = this._view.pieces[piece];
+		if (view !== undefined && this._handlers.onPieceDrop !== undefined) {
+			this._handlers.onPieceDrop(piece, view.row, view.col);
+		}
+	}
+
+	/**
 	 * 리셋 버튼을 눌렀다 - 판을 풀기 전 상태로 되돌린다.
 	 *
 	 * 입력이 꺼져 있을 때(일시정지·결과 화면)는 받지 않는다. 진행 중이던 누름은
@@ -667,7 +777,7 @@ export class PuzzleBoardPresenter {
 	 * 어느 순서로 와도 결과가 같다.
 	 */
 	public pointerExit(cell: number): void {
-		if (this._press === undefined || this._hoverCell !== cell) {
+		if (this._press === undefined || this._press.kind === 'piece' || this._hoverCell !== cell) {
 			return;
 		}
 		this.moveHoverOutside();
@@ -698,6 +808,11 @@ export class PuzzleBoardPresenter {
 	public pointerUp(): void {
 		const press = this._press;
 		if (press === undefined) {
+			return;
+		}
+		if (press.kind === 'piece') {
+			// 좌표 없는 뗌(뗌 안전망) - 지금 보이는 자리에 놓는다
+			this.finishPiecePress(press.index);
 			return;
 		}
 		// 뗄 때 `onExit` 가 먼저 와서 hover 가 지워졌더라도, 마지막으로 올라가 있던 칸에
@@ -743,7 +858,12 @@ export class PuzzleBoardPresenter {
 	}
 
 	public cancelPress(): void {
-		if (this._press === undefined) {
+		const press = this._press;
+		if (press === undefined) {
+			return;
+		}
+		if (press.kind === 'piece') {
+			this.finishPiecePress(press.index);
 			return;
 		}
 		this._press = undefined;

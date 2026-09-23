@@ -30,9 +30,13 @@ import { EPuzzleId } from 'PuzzleUI_Definitions';
 export type PuzzleProgressSnapshot = { [puzzleId: string]: number };
 
 /**
- * 진행도를 실제로 담아 두는 곳. 구현은 둘이다.
+ * 진행도를 실제로 담아 두는 곳. 구현은 셋이다.
  *   - `MemoryProgressStorage` : 이 세션 동안만 (기본값, 어디서나 동작)
- *   - `HorizonProgressStorage`: 플레이어 영구 변수 (`PuzzleUI_PersistentProgress.ts`)
+ *   - `RelayProgressStorage`  : 서버 스크립트에 중계 (`PuzzleUI_PersistentProgress.ts`) - 로컬 패널이 쓴다
+ *   - `HorizonProgressStorage`: 플레이어 영구 변수 직접 접근 - **서버 스크립트에서만** 쓴다
+ *
+ * `load()` 는 동기다. 읽기가 비동기인 중계 구현은 빈 스냅샷을 돌려주고,
+ * 응답이 오면 `PuzzleProgressTracker.hydrate()` 로 뒤늦게 합친다.
  */
 export interface IPuzzleProgressStorage {
 	load(): PuzzleProgressSnapshot;
@@ -155,6 +159,45 @@ export class PuzzleProgressTracker {
 		this._snapshot[key] = Math.floor(level);
 		this._storage.save(this._snapshot);
 		return true;
+	}
+
+	/**
+	 * 뒤늦게 도착한 진행도를 합친다.
+	 *
+	 * 로컬 스크립트는 영구 변수 API 를 부를 수 없어 서버 스크립트에 중계하는데, 그 응답이
+	 * 생성자보다 늦게 온다. 그래서 저장소는 빈 스냅샷으로 시작하고 응답이 오면 여기로 들어온다.
+	 *
+	 * 같은 퍼즐에 값이 둘 다 있으면 **큰 쪽을 남긴다** - 응답을 기다리는 사이에 한 판을 깼다면
+	 * 그 기록이 사라지면 안 된다. 그렇게 로컬이 앞선 경우에는 저장소에 다시 써 준다.
+	 *
+	 * @returns 화면에 보이는 값이 바뀌었는지. 호출자는 이때만 다시 그리면 된다
+	 */
+	public hydrate(incoming: PuzzleProgressSnapshot): boolean {
+		const merged = cloneSnapshot(incoming);
+		let isLocalAhead = false;
+
+		for (const key in this._snapshot) {
+			const mine = this._snapshot[key];
+			const theirs = merged[key];
+			if (theirs === undefined || mine > theirs) {
+				merged[key] = mine;
+				isLocalAhead = true;
+			}
+		}
+
+		let hasChanged = false;
+		for (const key in merged) {
+			if (this._snapshot[key] !== merged[key]) {
+				hasChanged = true;
+				break;
+			}
+		}
+
+		this._snapshot = merged;
+		if (isLocalAhead) {
+			this._storage.save(this._snapshot);
+		}
+		return hasChanged;
 	}
 
 	/** 진행도 초기화. 퍼즐을 지정하면 그 퍼즐만 */
